@@ -1,5 +1,6 @@
 import sympy
 
+
 def sympy_symbol(name):
     if isinstance(name, int):
         return sympy.Integer(name)

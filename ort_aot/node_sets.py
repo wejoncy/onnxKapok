@@ -1,6 +1,7 @@
 import onnx
 import onnx.numpy_helper
 
+
 class ElementWiseNodeSet:
     type_collection = set(
         {
@@ -52,7 +53,6 @@ class ShapeNodeSet:
         return optype in self.type_collection
 
 
-
 class ReduceNodeSetInternal:
     type_collection = set(
         {
@@ -77,19 +77,20 @@ class ReduceNodeSetInternal:
             "L2",
         }
     )
-    
+
     def __contains__(self, node_or_optype):
         if isinstance(node_or_optype, onnx.NodeProto):
             optype = node_or_optype.op_type
         else:
-            optype=node_or_optype
+            optype = node_or_optype
         return optype in self.type_collection
+
 
 class ReduceNodeSet:
     def __init__(self, produce_by: dict):
         self.produce_by = produce_by
         self.type_collection = ReduceNodeSetInternal().type_collection
-        
+
     def __contains__(self, node: onnx.NodeProto):
         if not isinstance(node, onnx.NodeProto):
             if node is not None and not isinstance(node, onnx.ValueInfoProto):
@@ -98,13 +99,15 @@ class ReduceNodeSet:
 
         if not node or node.op_type not in self.type_collection:
             return False
-        if len(node.input)>1:
-            assert len(node.input)==2, "Reduce node should have only one or two inputs"
+        if len(node.input) > 1:
+            assert (
+                len(node.input) == 2
+            ), "Reduce node should have only one or two inputs"
             if self.produce_by[node.input[1]][0].op_type != "Constant":
                 return False
             axes_tensor = self.produce_by[node.input[1]][0].attribute[0].t
             numpy_axes = onnx.numpy_helper.to_array(axes_tensor)
-            #only support the last axis
+            # only support the last axis
             if numpy_axes.size != 1 or numpy_axes[0] != -1:
                 return False
         attrs = node.attribute

@@ -1,4 +1,4 @@
-from collections import defaultdict,OrderedDict
+from collections import defaultdict, OrderedDict
 import onnx
 import copy
 import symbolic_shape_infer
@@ -8,9 +8,10 @@ class SpecialVar(object):
     def __init__(self):
         self.input_args = "input_args"
         self.output_args = "output_args"
-        self.input_args_size =  "input_args_size"
+        self.input_args_size = "input_args_size"
         self.parallel_loop_start = "p_loop_start"
         self.parallel_loop_end = "p_loop_end"
+
 
 def add_all_intermidiate_values(model):
     model_proto = copy.deepcopy(model)
@@ -72,17 +73,18 @@ class OnnxInGraph(object):
                     [d.dim_value or d.dim_param for d in dim],
                 )
 
-            return type_shape_dict,{}
+            return type_shape_dict, {}
         import transformers
         import onnxruntime as ort
+
         model_proto = add_all_intermidiate_values(model)
         tokenizer = transformers.AutoTokenizer.from_pretrained(
-            #"distilbert-base-uncased"
+            # "distilbert-base-uncased"
             "lordtt13/emo-mobilebert"
         )
         inputs = tokenizer("Hello, my dog is cute", return_tensors="np")
-        #inputs["input_mask"] = inputs["attention_mask"]
-        #del inputs["attention_mask"]
+        # inputs["input_mask"] = inputs["attention_mask"]
+        # del inputs["attention_mask"]
         sess = ort.InferenceSession(path_or_bytes=model_proto.SerializeToString())
         if sess.get_inputs()[0].name == "input_ids":
             ret = sess.run([i.name for i in sess.get_outputs()], dict(inputs))
@@ -90,9 +92,9 @@ class OnnxInGraph(object):
                 key.name: ret[idx].shape for idx, key in enumerate(sess.get_outputs())
             }
         else:
-            runtime_shape={}
+            runtime_shape = {}
 
-        return type_shape_dict,runtime_shape
+        return type_shape_dict, runtime_shape
 
     def gen_name2module_map(self):
         for vi in self.graph.value_info:
@@ -106,7 +108,7 @@ class OnnxInGraph(object):
         for node in self.graph.node:
             if node.name == "":
                 node.name = str(node.op_type) + str(node_idx)
-            
+
             node_idx += 1
             self.node_name2module[node.name] = node
             for out in node.output:
@@ -132,11 +134,10 @@ class OnnxInGraph(object):
                 "out_" + out.name
             ] = out  # add `out_` in case the output has the same name with the last node
         self.graph_output_names = ["out_" + out.name for out in self.graph.output]
-        symbol_shape,rt_shape = self.get_all_shape_from_onnx_model(self.model_proto)
-        self.tensor_type_shape_info.update(
-            symbol_shape
-        )
-        self.rt_shape= rt_shape
+        symbol_shape, rt_shape = self.get_all_shape_from_onnx_model(self.model_proto)
+        self.tensor_type_shape_info.update(symbol_shape)
+        self.rt_shape = rt_shape
+
 
 class GraphIOBuffer(object):
     def __init__(self):

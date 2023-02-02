@@ -1,7 +1,7 @@
 import common
 import lower
 from typing import Union, List, Tuple, Dict
-from collections import defaultdict, deque,OrderedDict
+from collections import defaultdict, deque, OrderedDict
 import copy
 import node_sets
 import tempfile, os
@@ -9,7 +9,7 @@ from pathlib import Path
 import subprocess
 from sympy_utils import *
 
-'''
+"""
 DataType = {
     UNDEFINED = 0;
     // Basic types.
@@ -50,7 +50,8 @@ AttributeType {
     SPARSE_TENSORS = 12;
     TYPE_PROTOS = 14;
   }
-'''
+"""
+
 
 class Schedule(object):
     def __init__(self):
@@ -101,14 +102,14 @@ class Schedule(object):
 
         for var in bb2.input:
             if var in new_output:
-                tmp_var_but_across_loop[var]=0
+                tmp_var_but_across_loop[var] = 0
                 new_output.remove(var)
             else:
                 new_input.add(var)
                 print(var.name)
         for i in tmp_var_but_across_loop.keys():
-            if i.name not in bb1.forward_var_set:    
-                bb1.forward_var_set[i.name]=i
+            if i.name not in bb1.forward_var_set:
+                bb1.forward_var_set[i.name] = i
         bb1.output = list(new_output)
         bb1.input = list(new_input)
 
@@ -254,7 +255,8 @@ class MainFunctionForDebug(lower.IRNode):
         ), "input and output dynamic shape axis should be same"
         assert len(in_dynamic_shape_axis[0]) in [
             1,
-            2,3,
+            2,
+            3,
         ], "only support two dynamic shape axis"
 
         i_all_elem_s = []
@@ -272,7 +274,7 @@ class MainFunctionForDebug(lower.IRNode):
             for dy in out_dy_axis[1:]:
                 output_shape[dy] = 24
             if 0 in out_dy_axis:
-                output_shape[0] = 1 
+                output_shape[0] = 1
             o_all_elem_s.append(np.prod(output_shape))
 
         code = f"""
@@ -330,7 +332,7 @@ int main(int argc, const char* argv[]) {{
 class CPPCodeGen(object):
     def __init__(self):
         pass
-    
+
     def gen_cpp_code(
         self, module: lower.ModuleNode, global_buffer: common.GraphIOBuffer
     ):
@@ -340,9 +342,8 @@ class CPPCodeGen(object):
         if isinstance(module.body[-1], MainFunctionForDebug):
             code = "#include <cstdio>\n#include <cstdlib>\n"
         code_section = []
-        
+
         code_section.append(module.code_spice({}, 0))
-        
 
         code += "\n\n".join(code_section)
 
@@ -350,8 +351,10 @@ class CPPCodeGen(object):
 
 
 class CppBackend(object):
-    def __init__(self):
-        pass
+    def __init__(self, lib_path: Path, target: str, debug_mode=False):
+        self.lib_path = lib_path
+        self.target = target
+        self.debug_mode = debug_mode
 
     def lower(
         self,
@@ -374,7 +377,10 @@ class CppBackend(object):
         func.lower()
         return func
 
-    def compile_to_so(self, code: str, lib_path: Path, target:str, Debug=False):
+    def compile_to_so(self, code: str):
+        lib_path = self.lib_path
+        target = self.target
+        Debug = self.debug_mode
         if target == "x86_64":
             CXX = "g++"
         elif target == "aarch64":
@@ -396,9 +402,9 @@ class CppBackend(object):
                 out_str = subprocess.check_output(cmd, shell=True).decode("utf-8")
             assert lib_path.exists(), "compile failed"
 
-    def compile(self, models_with_name: dict, lib_path:Path, target:str = "x86_64"):
+    def compile(self, models_with_name: dict):
+        DEBUG = self.debug_mode
         function_recipes = []
-        DEBUG = True
 
         debug_idx = -1
         for func_name, model in models_with_name.items():
@@ -431,10 +437,10 @@ class CppBackend(object):
         with open("code.cc", "w") as f:
             f.write(src_code)
 
-        self.compile_to_so(src_code, lib_path, target, DEBUG)
+        self.compile_to_so(src_code)
 
         # print(src_code)
-        return lib_path
+        return self.lib_path
 
 
 class ExecutionPrepare(object):

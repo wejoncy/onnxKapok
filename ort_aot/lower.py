@@ -2,7 +2,7 @@ import common
 import numpy as np
 from abc import ABCMeta, abstractmethod
 from enum import Enum
-from collections import defaultdict, deque,OrderedDict
+from collections import defaultdict, deque, OrderedDict
 from typing import Union, List, Tuple, Dict
 import sympy_utils
 import sympy
@@ -202,15 +202,15 @@ class ComputeBuffer(object):
         if shape is None:
             return None
         else:
-            symbol_shapes=[]
+            symbol_shapes = []
             for x in shape:
                 if isinstance(x, str):
                     symbol_shape = sympy.Symbol(x)
                 else:
-                    symbol_shape= sympy.Integer(x)
+                    symbol_shape = sympy.Integer(x)
                 symbol_shapes.append(symbol_shape)
             return symbol_shapes
-    
+
     def __eq__(self, o):
         if isinstance(o, ComputeBuffer):
             return self.name == o.name
@@ -246,8 +246,8 @@ class Loop(IRNode):
         self.step = sympy.Integer(1)
         self.body = None
         self.depth = 0
-        self.parallel:bool = False
-        self.parallel_nest_loop:Loop = None
+        self.parallel: bool = False
+        self.parallel_nest_loop: Loop = None
         self.attributes = LoopAttr.Parallel
         self.forward_var_set: Dict[ComputeBuffer] = OrderedDict()
 
@@ -265,16 +265,24 @@ class Loop(IRNode):
                 )
         src = dec_header
         src += " " * indent + f"//@{self.attributes.name}\n"
-        src+= " " * indent
-        if self.parallel:            
-            p_var = f'{self.var}'
-            p_var += f'_{self.parallel_nest_loop.var}' if self.parallel_nest_loop else ""
+        src += " " * indent
+        if self.parallel:
+            p_var = f"{self.var}"
+            p_var += (
+                f"_{self.parallel_nest_loop.var}" if self.parallel_nest_loop else ""
+            )
             src += f"for (int {p_var}={common.SpecialVar().parallel_loop_start}; {p_var}<{common.SpecialVar().parallel_loop_end}; {p_var}+={self.step}){{\n"
             if self.parallel_nest_loop:
-                indents = " " * (indent*2)
-                src += indents+f"auto {self.var} = {p_var}/{self.parallel_nest_loop.end};\n"
-                nest_var =self.parallel_nest_loop.var
-                src += indents+f"auto {nest_var} = {p_var}%{self.parallel_nest_loop.end};\n"
+                indents = " " * (indent * 2)
+                src += (
+                    indents
+                    + f"auto {self.var} = {p_var}/{self.parallel_nest_loop.end};\n"
+                )
+                nest_var = self.parallel_nest_loop.var
+                src += (
+                    indents
+                    + f"auto {nest_var} = {p_var}%{self.parallel_nest_loop.end};\n"
+                )
         else:
             src += f"for (int {self.var}={self.start}; {self.var}<{self.end}; {self.var}+={self.step}){{\n"
         if isinstance(self.body, list):
@@ -309,14 +317,18 @@ class FunctionNode(IRNode):
 
         # in_param = [f"const float* e_{var_map[i.name]}" for i in self.input]
 
-        in_param = [f"const float** {common.SpecialVar().input_args}", f"int {common.SpecialVar().input_args_size}"]
+        in_param = [
+            f"const float** {common.SpecialVar().input_args}",
+            f"int {common.SpecialVar().input_args_size}",
+        ]
         if self.body[0].body.parallel:
-            in_param += [f'int64_t {common.SpecialVar().parallel_loop_start}, int64_t {common.SpecialVar().parallel_loop_end}']
+            in_param += [
+                f"int64_t {common.SpecialVar().parallel_loop_start}, int64_t {common.SpecialVar().parallel_loop_end}"
+            ]
         in_param += [f"const int64_t {i}" for i in self.shape_var]
         in_param = ",".join(in_param)
-        
-        
-        #out_param = ",".join([f"float* e_{var_map[i.name]}" for i in self.output])
+
+        # out_param = ",".join([f"float* e_{var_map[i.name]}" for i in self.output])
         out_param = f"float** output_args"
 
         func_signature = f"int {self.name}({in_param}, {out_param}) {{\n"
@@ -337,13 +349,15 @@ class FunctionNode(IRNode):
         code += assert_code
 
         parse_input = [
-            " " * indent + f"const float* e_{var_map[i.name]} = {common.SpecialVar().input_args}[{idx}];"
+            " " * indent
+            + f"const float* e_{var_map[i.name]} = {common.SpecialVar().input_args}[{idx}];"
             for idx, i in enumerate(self.input)
         ]
         code += "\n".join(parse_input) + "\n\n"
 
         parse_output = [
-            " " * indent + f"float* e_{var_map[i.name]} = {common.SpecialVar().output_args}[{idx}];"
+            " " * indent
+            + f"float* e_{var_map[i.name]} = {common.SpecialVar().output_args}[{idx}];"
             for idx, i in enumerate(self.output)
         ]
         code += "\n".join(parse_output) + "\n\n"
@@ -365,7 +379,7 @@ class FunctionNode(IRNode):
                 x_arrstr = np.char.mod("%.6e", np_array)
                 x_str = ",".join(x_arrstr)
                 #################
-                #x_str='0'
+                # x_str='0'
                 #################
                 if np_array.size == 1:
                     const_declare = (
@@ -446,7 +460,7 @@ class ComputeNode(IRNode):
             src += f"{named_var_o} = pow({named_vars_i[0]},{named_vars_i[1]});\n"
         elif self.op_type == "Sqrt":
             src += f"{named_var_o} = sqrt({named_vars_i[0]});\n"
-        #elif self.op_type == "Cast":
+        # elif self.op_type == "Cast":
         #    src += f"{named_var_o} = sqrt({named_vars_i[0]});\n"
         else:
             raise Exception("not supported")
@@ -495,7 +509,7 @@ class Indexer:
             return f"{named_var}"
         else:
             shape = buf.shape or (buf.data is not None and buf.data.shape) or [1]
-            index_of_dim_1 =[i for i in range(len(shape)) if shape[i]==1]
+            index_of_dim_1 = [i for i in range(len(shape)) if shape[i] == 1]
             stride = self.cal_stride(shape)
             index: sympy.Expr = buf.loop_index or [
                 sympy_utils.sympy_symbol(f"i_{i}")
@@ -503,15 +517,17 @@ class Indexer:
             ]
             if len(index) > len(shape):
                 index = index[len(index) - len(shape) :]
-            #broadcast handling
-            br_index = [v for idx,v in enumerate(index) if idx not in index_of_dim_1]
-            br_stride = [v for idx,v in enumerate(stride) if idx not in index_of_dim_1]
+            # broadcast handling
+            br_index = [v for idx, v in enumerate(index) if idx not in index_of_dim_1]
+            br_stride = [v for idx, v in enumerate(stride) if idx not in index_of_dim_1]
 
             res = sympy.Matrix([br_index]).dot(sympy.Matrix(br_stride))
-            #res = res.subs(shape[0], 1)
-            gs= re.findall('([a-zA-Z0-9_]+)\*\*(\d)', str(res))
-            assert gs==[] #or gs[0][1] == '2', f"TODO fix me when pow {gs[0][1]} or other"
-            #res= re.sub('([a-zA-Z0-9_]+)\*\*(\d)','\g<1>*\g<1>',str(res))            
+            # res = res.subs(shape[0], 1)
+            gs = re.findall("([a-zA-Z0-9_]+)\*\*(\d)", str(res))
+            assert (
+                gs == []
+            )  # or gs[0][1] == '2', f"TODO fix me when pow {gs[0][1]} or other"
+            # res= re.sub('([a-zA-Z0-9_]+)\*\*(\d)','\g<1>*\g<1>',str(res))
             return f"{named_var}[{res}]"
         pass
 
@@ -747,7 +763,7 @@ class ExecutionBlock(IRNode):
         for i in list(outputs.keys()):
             if i in list(inputs.keys()) and i not in external_buffer_out_set:
                 outputs[i] = len(c_graph.egraph.consumed_by[i]) - inputs[i]
-                self.intermediate_var[i]=0
+                self.intermediate_var[i] = 0
                 inputs.pop(i)
                 assert outputs[i] >= 0, "output buffer can not be input"
                 if outputs[i] == 0:
@@ -771,7 +787,7 @@ class ExecutionBlock(IRNode):
 
         for v in inputs:
             if v in external_buffer_out_set:
-                print("intermediate value appears in output, skip load", v)
+                # print("intermediate value appears in output, skip load", v)
                 continue
             if v in cached_buffer:
                 type_and_shape = c_graph.egraph.tensor_type_shape_info[v]
