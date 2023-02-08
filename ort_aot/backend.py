@@ -1,5 +1,7 @@
 import common
 import lower
+from logger import logger
+
 from typing import Union, List, Tuple, Dict
 from collections import defaultdict, deque, OrderedDict
 import copy
@@ -87,8 +89,6 @@ class Schedule(object):
     def update_IO_after_fusion_op(
         self, bb1: lower.ExecutionBlock, bb2: lower.ExecutionBlock
     ):
-        bb1.forward_var_set.update(bb2.forward_var_set)
-        bb2.forward_var_set.clear()
         bb1.var_map.update(bb2.var_map)
         bb2.var_map.clear()
         bb1.intermediate_var.update(bb2.intermediate_var)
@@ -101,15 +101,18 @@ class Schedule(object):
         new_output = set(bb2.output + bb1.output)
 
         for var in bb2.input:
-            if var in new_output:
-                tmp_var_but_across_loop[var] = 0
+            if var in bb1.output:
+                tmp_var_but_across_loop[var.name] = var
                 new_output.remove(var)
             else:
-                new_input.add(var)
-                print(var.name)
-        for i in tmp_var_but_across_loop.keys():
-            if i.name not in bb1.forward_var_set:
-                bb1.forward_var_set[i.name] = i
+                bb2.forward_var_set[-1][var.name] = var
+                # new_input.add(var)
+
+        for k, v in tmp_var_but_across_loop.items():
+            if k not in bb1.forward_var_set[-1]:
+                bb1.forward_var_set[-1][k] = v
+
+        bb1.forward_var_set.extend(bb2.forward_var_set)
         bb1.output = list(new_output)
         bb1.input = list(new_input)
 
@@ -192,6 +195,42 @@ class Schedule(object):
         blocks[0].body = do_tile_loop(bb1.body)
         return blocks
 
+    def vectoring_inner_loop(
+        self, blocks: List[lower.ExecutionBlock], lanes: int = 16
+    ) -> List[lower.ExecutionBlock]:
+        assert (
+            len(blocks) == 1
+        ), " only support one block now, but got {} blocks".format(len(blocks))
+        bb1: lower.ExecutionBlock = blocks[0]
+        if not isinstance(bb1.body, lower.Loop):
+            return blocks
+
+        def do_vectoring_loop(loop: lower.Loop):
+            if loop.depth > 0:
+                if isinstance(loop.body, list):
+                    loop.body = [do_vectoring_loop(i) for i in loop.body]
+                else:
+                    loop.body = do_vectoring_loop(loop.body)
+                return loop
+
+            if (
+                (loop.end - loop.start) % lanes != 0
+                or loop.step != 1
+                or loop.vectorization
+                or loop.parallel
+            ):
+                return loop
+            loop.vectorization = True
+            for op in loop.body:
+                assert isinstance(
+                    op, lower.IRNode
+                ), f"expected op to be IRNode, but got {type(op)}"
+                op.vectorization = True
+            return loop
+
+        blocks[0].body = do_vectoring_loop(bb1.body)
+        return blocks
+
     def parallelize_outer_loop(
         self, blocks: List[lower.ExecutionBlock], parallel_depth: int = 2
     ) -> List[lower.ExecutionBlock]:
@@ -239,7 +278,7 @@ class MainFunctionForDebug(lower.IRNode):
         self.in_arg_type_shape = in_type_shape
         self.out_arg_type_shape = out_type_shape
 
-    def code_spice(self, var_map: dict, indent: int = 0):
+    def code_gen(self, var_map: dict, indent: int = 0):
         in_shapes = [i[1] for i in self.in_arg_type_shape]
         out_shapes = [i[1] for i in self.out_arg_type_shape]
         in_dynamic_shape_axis = [
@@ -276,6 +315,14 @@ class MainFunctionForDebug(lower.IRNode):
             if 0 in out_dy_axis:
                 output_shape[0] = 1
             o_all_elem_s.append(np.prod(output_shape))
+
+        idx = [
+            i
+            for i in range(len(in_dynamic_shape_axis))
+            if len(in_dynamic_shape_axis[i]) > 1
+        ][0]
+        in_dy_axis = in_dynamic_shape_axis[idx]
+        input_shape = in_shapes[idx]
 
         code = f"""
 #include <cassert>
@@ -343,7 +390,7 @@ class CPPCodeGen(object):
             code = "#include <cstdio>\n#include <cstdlib>\n"
         code_section = []
 
-        code_section.append(module.code_spice({}, 0))
+        code_section.append(module.code_gen({}, 0))
 
         code += "\n\n".join(code_section)
 
@@ -355,18 +402,22 @@ class CppBackend(object):
         self.lib_path = lib_path
         self.target = target
         self.debug_mode = debug_mode
+        self.context: common.HardwareContext = common.HardwareContext(target, 16)
 
     def lower(
         self,
         blocks: List[lower.ExecutionBlock],
         global_buffer: common.GraphIOBuffer,
         func_name: str,
+        allow_vectorize: bool = True,
     ) -> lower.FunctionNode:
         for block in blocks:
             block.lower()
         schedule = Schedule()
         blocks = schedule.fusion_op(blocks)
-        blocks = schedule.tile_inner_loop(blocks)
+        blocks = schedule.tile_inner_loop(blocks, self.context.vec_lanes)
+        if allow_vectorize:
+            blocks = schedule.vectoring_inner_loop(blocks, self.context.vec_lanes)
         blocks = schedule.parallelize_outer_loop(blocks)
         func = lower.FunctionNode(
             global_buffer.var_buffer_in, global_buffer.var_buffer_out
@@ -374,6 +425,7 @@ class CppBackend(object):
         func.body = blocks
         func.const_var = global_buffer.const_buffer
         func.name = func_name
+        func.hw_context = self.context
         func.lower()
         return func
 
@@ -381,6 +433,19 @@ class CppBackend(object):
         lib_path = self.lib_path
         target = self.target
         Debug = self.debug_mode
+        INC_FLAG = Path(".").resolve(strict=True) / "thirdparty/MIPP/install/include/"
+        vec_flag = "-mavx512f"
+        # -fopt-info -fopenmp
+        try_flag = (
+            "-pipe -finline-functions -fomit-frame-pointer -fno-stack-protector "
+            + " -fno-math-errno -fno-trapping-math -fno-common -fgraphite-identity "
+            + " -floop-nest-optimize -ftree-loop-distribution "
+            + " -fno-semantic-interposition -fipa-pta -fno-plt "
+        )
+        try_ld = "-Wl,--strip-all"
+        cxx_flag = (
+            f"-std=c++17 -O3 -mfma  {try_flag}  {try_ld} -fPIC {vec_flag} -I{INC_FLAG}"
+        )
         if target == "x86_64":
             CXX = "g++"
         elif target == "aarch64":
@@ -392,13 +457,13 @@ class CppBackend(object):
             with open(code_file, "w") as f:
                 f.write(code)
             o_file = os.path.join(tmpdirname, "code.o")
-            cmd = f"{CXX} -fPIC -O3 -c {code_file} -o {o_file}"
+            cmd = f"{CXX} {cxx_flag} -c {code_file}  -o {o_file}"
             out_str = subprocess.check_output(cmd, shell=True).decode("utf-8")
-            cmd = f"{CXX} -shared  -fPIC -O3 -o {lib_path} {o_file} "
+            cmd = f"{CXX} -shared  {cxx_flag}  {o_file} -o {lib_path}  "
             out_str = subprocess.check_output(cmd, shell=True).decode("utf-8")
 
             if Debug:
-                cmd = f"{CXX} -g {code_file} -o {lib_path}.exe"
+                cmd = f"{CXX} -g {code_file} -I{INC_FLAG} -o {lib_path}.exe"
                 out_str = subprocess.check_output(cmd, shell=True).decode("utf-8")
             assert lib_path.exists(), "compile failed"
 

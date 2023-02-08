@@ -2,7 +2,7 @@ import onnxruntime as ort
 import onnx
 from onnxsim import simplify
 
-import time
+import tempfile
 import numpy as np
 from collections import deque, OrderedDict
 from queue import PriorityQueue
@@ -16,6 +16,7 @@ import lower
 import common
 import backend
 import node_sets
+from logger import logger
 
 
 def remove_unused_nodes(model: onnx.ModelProto) -> onnx.ModelProto:
@@ -49,9 +50,25 @@ class CaptureOnnxSubGraph(object):
         self.in_graph: common.OnnxInGraph = None
 
     def load(self, model_path):
-        self.model_proto = onnx.shape_inference.infer_shapes(
-            onnx.load(model_path), strict_mode=True
-        )
+        if 0:
+            session_options = ort.SessionOptions()
+            session_options.graph_optimization_level = (
+                ort.GraphOptimizationLevel.ORT_ENABLE_EXTENDED
+            )
+            with tempfile.NamedTemporaryFile() as temp:
+                session_options.optimized_model_filepath = temp.name
+                f_model = ort.InferenceSession(
+                    str(model_path),
+                    providers=["CPUExecutionProvider"],
+                    sess_options=session_options,
+                )
+                self.model_proto = onnx.shape_inference.infer_shapes(
+                    onnx.load(temp.name), strict_mode=True
+                )
+        else:
+            self.model_proto = onnx.shape_inference.infer_shapes(
+                onnx.load(str(model_path)), strict_mode=True
+            )
         self.graph = self.model_proto.graph
         self.in_graph = common.OnnxInGraph(self.model_proto)
         self.in_graph.gen_name2module_map()
@@ -89,7 +106,7 @@ class CaptureOnnxSubGraph(object):
             op_type="AOTanyOp",
             inputs=list(sub_graph.input_name_exclude_constant.keys()),
             outputs=list(sub_graph.output_name_ref_c.keys()),
-            name=node_name,
+            name=func_name,
             domain="com.microsoft",
             func_name=func_name,
             func_type=len(sub_graph.input_name_exclude_constant.keys()),
@@ -225,7 +242,7 @@ class CaptureOnnxSubGraph(object):
             node_sets.ReduceNodeSet(self.in_graph.produced_by).type_collection
         )
         assigned_node_by_name = set()
-        available_tensor = set()
+        available_tensor = set(self.in_graph.graph_input_names)
 
         def find_sub_graph_by_dfs(
             q_nodes: PriorityQueue,
@@ -313,7 +330,7 @@ class CaptureOnnxSubGraph(object):
             #    else:
             #        assigned_node_by_name.add(node.name)
 
-        print("before fusion, this graph has :", len(self.graph.node), " nodes")
+        logger.info(f"before fusion, this graph has : {len(self.graph.node)} nodes")
         sub_graph_list = []
         sub_model_list = []
         for node in self.graph.node:
@@ -335,7 +352,7 @@ class CaptureOnnxSubGraph(object):
                 if sub_model:
                     sub_graph_list.append(sub_graph)
                     sub_model_list.append(sub_model)
-                    if len(sub_model_list) == 5000:
+                    if len(sub_model_list) == 1000:
                         break
             else:  # not element-wise node
                 assigned_node_by_name.add(node.name)
@@ -346,10 +363,18 @@ class CaptureOnnxSubGraph(object):
         for idx, (sub_graph, sub_model) in enumerate(
             zip(sub_graph_list, sub_model_list)
         ):
-            # if idx != 4:continue
+            # if idx != 1:continue
+            break_f = False
+            # bypass Gelu
+            for node in sub_graph.sub_graph_nodes:
+                if node.op_type == "Erf":
+                    break_f = True
+                    break
+            if break_f:
+                continue
             func_name = self.substitute_nodes_with_subgraph(sub_graph, lib_path)
             model_with_name[func_name] = sub_model
 
         self.graph.node.sort(key=lambda x: self.node_order[x.name])
-        print("after fusion, this graph has :", len(self.graph.node), " nodes")
+        logger.info(f"after fusion, this graph has : {len(self.graph.node)}  nodes")
         return model_with_name

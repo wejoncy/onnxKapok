@@ -31,7 +31,7 @@ def get_canonized_name(model_name: str):
 def get_tokenizer_and_huggingface_model(model_name):
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_name)
     config = transformers.AutoConfig.from_pretrained(model_name)
-    text_one_query = ("Christening a shock-and-awe short-selling outfit requires more creativity. Hindenburg Research, named after the doomed hydrogen-filled German airship, was founded by Jim Henson in 2017 to hunt for impending corporate disasters, and then hold a torch to them",)
+    text_one_query = ("Christening a shock-and-awe short-selling outfit requires more creativity. ",)
     if model_name == "xlm-roberta-base":
         model = transformers.AutoModelForSequenceClassification.from_pretrained(
             model_name
@@ -83,7 +83,7 @@ def export_backbone_or_existed(model_name: str):
 
     bert_onnx_model = get_this_dir() / get_canonized_name(model_name)
     if bert_onnx_model and bert_onnx_model.exists():
-        print("User provided a customized onnx Model, skip regenerating.")
+        #print("User provided a customized onnx Model, skip regenerating.")
         return bert_onnx_model
 
     # fix the seed so we can reproduce the results

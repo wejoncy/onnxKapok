@@ -19,8 +19,10 @@ import common
 from backend import CppBackend
 import node_sets
 import graph_capture
+from logger import logger
 
-target = "x86_64"
+
+# target = "x86_64"
 # target = "aarch64"
 def compile_model(
     model_path: Path, output_path: Path, lib_path: Path, target: str = "x86_64"
@@ -38,19 +40,33 @@ def compile_model(
     # model_simp, check = simplify(self.model_proto)
     # assert check, "Simplified ONNX model could not be validated"
     onnx.save(model_simp, output_path)
-    print(f"successful compiled to onnx model:{output_path} lib_path:{lib_path}")
+    logger.info(f"successful compiled to onnx model:{output_path} lib_path:{lib_path}")
 
 
-def debug_model(model_path: Path, target: str = "x86_64"):
-    lib_path = Path(".").resolve(strict=True) / "libcode.so"
-    save_path = Path("./fused.onnx").resolve()
-
+def debug_model(
+    model_path: Path, output_path: Path, lib_path: Path, target: str = "x86_64"
+):
     capturer = graph_capture.CaptureOnnxSubGraph()
     model_with_name = capturer.run(model_path, lib_path)
-    cpp_backend = CppBackend(lib_path, target)
+    cpp_backend = CppBackend(lib_path, target, debug_mode=True)
     cpp_backend.compile(model_with_name)
 
     test_lib(model_with_name, lib_path)
+
+    for v in model_with_name.values():
+        capturer.model_proto.graph.output.extend(v.graph.output)
+    capturer.model_proto.graph.output.extend(
+        [
+            onnx.ValueInfoProto(
+                name="/mobilebert/encoder/layer.23/ffn.1/output/Add_output_0"
+            )
+        ]
+    )
+
+    opset = capturer.model_proto.opset_import.add()
+    opset.version = 1
+    opset.domain = "com.microsoft"
+    onnx.save(capturer.model_proto, output_path)
 
 
 class CostTime(object):
@@ -70,10 +86,9 @@ class CostTime(object):
 
 def test_lib(onnx_model_map: dict, lib_path: Path):
     if len(onnx_model_map) > 1:
-        print(" not support test multi subgraph")
-        return
+        logger.info(" multi subgraphs detected, will test the last one")
 
-    func_name, onnx_model = onnx_model_map.popitem()
+    func_name, onnx_model = list(onnx_model_map.items())[-1]
     input_shapes = [
         [i.dim_param or i.dim_value for i in inp.type.tensor_type.shape.dim]
         for inp in onnx_model.graph.input
@@ -161,7 +176,9 @@ def test_lib(onnx_model_map: dict, lib_path: Path):
     for idx, a_x in enumerate(a_in):
         a_x.tofile(f"a{idx}.bin")
 
-    session = ort.InferenceSession(onnx_model.SerializeToString())
+    session = ort.InferenceSession(
+        onnx_model.SerializeToString(), providers=["CPUExecutionProvider"]
+    )
     input_feed = {i.name: a_in[idx] for idx, i in enumerate(session.get_inputs())}
 
     py_tc = [0]
@@ -173,9 +190,9 @@ def test_lib(onnx_model_map: dict, lib_path: Path):
         [np.allclose(out[i], c_out[i], rtol=1e-03, atol=1e-05) for i in range(len(out))]
     )
     if all_passed:
-        print(f"Results are matched, time_cost: py_tc:{py_tc}, c_tc:{c_tc}")
+        logger.info(f"Results are matched, time_cost: py_tc:{py_tc}, c_tc:{c_tc}")
     else:
-        print("Results are not matched")
+        logger.warning("Results are not matched")
 
 
 def topological_by_level():

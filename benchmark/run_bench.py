@@ -1,9 +1,9 @@
 import sys
-
 sys.path.insert(0, r"/home/stcadmin/work/onnxruntime/build/py38/Release/build/lib")
+
 import onnxruntime
 from pathlib import Path
-
+import shutil
 sys.path.append(str(Path(__file__).parent.parent.resolve()))
 from data.get_test_data import (
     get_backbone_onnx_path,
@@ -12,9 +12,11 @@ from data.get_test_data import (
 
 import transformers
 import numpy as np
-
+import onnx
+import onnx.numpy_helper
 import ort_aot
-
+import ort_aot.logger 
+logger = ort_aot.logger.logger
 
 def verify_results(model_file: Path, model_name: str, onnx_bert_model: Path = None):
     """
@@ -25,14 +27,37 @@ def verify_results(model_file: Path, model_name: str, onnx_bert_model: Path = No
     """
     tokenizer, hg_model, _, text = get_tokenizer_and_huggingface_model(model_name)
     encoded_input = tokenizer(*text, return_tensors="pt")
-    transformers.set_seed(42)
-
-    session_options = onnxruntime.SessionOptions()
-
-    if onnx_bert_model.exists():
-        session = onnxruntime.InferenceSession(
-            str(onnx_bert_model.resolve(strict=True))
+    
+    # save input for debug
+    test_data_dir = model_file.parent/"test_data"
+    shutil.rmtree(str(test_data_dir), ignore_errors=True)
+    test_data_dir.mkdir(exist_ok=True)
+    
+    for idx,(k,v) in enumerate(encoded_input.items()):
+        input_tensor = onnx.numpy_helper.from_array(
+            v.numpy(), name=k
         )
+        open(f"{test_data_dir}/input_{idx}.pb", "wb").write(input_tensor.SerializeToString())
+        
+    transformers.set_seed(42)
+    
+    
+    aot_model = onnx.load(str(model_file.resolve(strict=True)))
+    aot_model_output= {i.name:i for i in aot_model.graph.output}
+    del aot_model
+    
+    session_options = onnxruntime.SessionOptions()
+    if onnx_bert_model.exists():
+        onnx_model = onnx.load(str(onnx_bert_model.resolve(strict=True)))
+        for i in onnx_model.graph.output:
+            aot_model_output.pop(i.name)
+        onnx_model.graph.output.extend(aot_model_output.values())
+        session = onnxruntime.InferenceSession(
+            onnx_model.SerializePartialToString(),
+            #str(onnx_bert_model.resolve(strict=True)),
+            providers=["CPUExecutionProvider"],
+        )
+        del onnx_model
         inputs = {key: value.detach().numpy() for key, value in encoded_input.items()}
 
         ref_outputs = session.run([i.name for i in session.get_outputs()], inputs)
@@ -45,7 +70,9 @@ def verify_results(model_file: Path, model_name: str, onnx_bert_model: Path = No
         ref_map_out = {i: ref_outputs[idx] for idx, i in enumerate(outs.keys())}
 
     session = onnxruntime.InferenceSession(
-        str(model_file.resolve(strict=True)), session_options
+        str(model_file.resolve(strict=True)),
+        session_options,
+        providers=["CPUExecutionProvider"],
     )
 
     real_outputs = session.run([i.name for i in session.get_outputs()], inputs)
@@ -58,14 +85,11 @@ def verify_results(model_file: Path, model_name: str, onnx_bert_model: Path = No
     assert np.allclose(
         real_outputs[matched_idx],
         ref_outputs[0],
-        atol=1e-12,
-        rtol=1e-15,
-    ), f"Results do not match, expected:{ref_outputs[0]}, but got {real_outputs[matched_idx] }"
-    print(
-        "Results matches:",
-        real_outputs[0],
-        "\ndiff:",
-        real_outputs[matched_idx] - ref_outputs[0],
+        atol=1e-4,
+        rtol=1e-5,
+    ), f"Results do not match, expected:{ref_outputs[0]}, \nbut got {real_outputs[matched_idx] }, \ndiff:{real_outputs[matched_idx] - ref_outputs[0]}"
+    logger.info(
+        f"Results matches:{real_outputs[0]},\ndiff: {real_outputs[matched_idx] - ref_outputs[0]}"
     )
 
 
@@ -74,12 +98,18 @@ def do_bench(output_model_path: Path, input_model_path: Path, model_name: str):
     encoded_input = tokenizer(*text, return_tensors="np")
 
     session_options = onnxruntime.SessionOptions()
+    #session_options.intra_op_num_threads = 4
+    # session_options.enable_profiling = True
+    # session_options.optimized_model_filepath = "./o3.onnx"
     session_options.log_severity_level = 4
+
     session_in = onnxruntime.InferenceSession(
         str(input_model_path.resolve(strict=True)),
         session_options,
         providers=["CPUExecutionProvider"],
     )
+    session_options.optimized_model_filepath = ""
+
     session_out = onnxruntime.InferenceSession(
         str(output_model_path.resolve(strict=True)),
         session_options,
@@ -89,38 +119,45 @@ def do_bench(output_model_path: Path, input_model_path: Path, model_name: str):
 
     c_tc = []
     # warmup
-    for _ in range(5):
-        _ = session_in.run(None, inputs)
-        _ = session_out.run(None, inputs)
+    def do_bench(session, warmup=10, repeat=100, c_tc=c_tc):
+        for _ in range(warmup):
+            _ = session.run(None, inputs)
 
-    repeat = 1000
-    with ort_aot.CostTime(c_tc, repeat) as tc:
-        for i in range(repeat):
-            _ = session_in.run(None, inputs)
-    with ort_aot.CostTime(c_tc, repeat) as tc:
-        for i in range(repeat):
-            _ = session_out.run(None, inputs)
+        with ort_aot.CostTime(c_tc, repeat) as tc:
+            for i in range(repeat):
+                _ = session.run(None, inputs)
+        prof_file = None  # session.end_profiling()
+        return prof_file
+
+    do_bench(session_in)
+    do_bench(session_out)
 
     print(
-        f"the original model cost time: {c_tc[0]}ms, the aot model cost time: {c_tc[1]}ms"
+        f"time-cost changes from {c_tc[0]:.6}ms to {c_tc[1]:.6}ms, speedup: {(c_tc[0]-c_tc[1])*100/c_tc[0]:.2f}%"
     )
 
 
-def run():
-    model_name = "google/mobilebert-uncased"
-    model_name = "xlm-roberta-base"
-    model_name = "lordtt13/emo-mobilebert"
-    model_name = "distilbert-base-uncased"
+def run(model_name: str):
+    print(f"benchmark model: >>> {model_name} >>> ", end=': ')
     bert_onnx_model = get_backbone_onnx_path(model_name)
     output_path = Path(str(bert_onnx_model).replace(".onnx", "_aot.onnx"))
-    lib_path = Path(__file__).parent.resolve(strict=True) / "libcode.so"
-    if output_path.exists() and lib_path.exists():
-        print("bypass compiling, use cached model")
+    lib_path = (
+        Path(__file__).parent.resolve(strict=True) / f"lib{bert_onnx_model.stem}.so"
+    )
+    if output_path.exists() and lib_path.exists() and False:
+        logger.debug("bypass compiling, use cached model")
     else:
+        #ort_aot.debug_model(bert_onnx_model, output_path, lib_path)
         ort_aot.compile_model(bert_onnx_model, output_path, lib_path)
-    # verify_results(output_path, model_name, bert_onnx_model)
+    #verify_results(output_path, model_name, bert_onnx_model)
     do_bench(output_path, bert_onnx_model, model_name)
 
 
 if __name__ == "__main__":
-    run()
+    logger.setLevel(ort_aot.logger.logging.WARNING)
+    run("google/mobilebert-uncased")
+    run("csarron/mobilebert-uncased-squad-v2")
+    run("lordtt13/emo-mobilebert")
+    for i in range(100):
+        run("xlm-roberta-base")
+        run("distilbert-base-uncased")

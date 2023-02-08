@@ -12,12 +12,12 @@ class ElementWiseNodeSet:
             "Div",
             "Mul",
             # "Cast",
-            # "Erf",
+            "Erf",
             # "Gelu",
         }
     )
 
-    def __contains__(self, optype):
+    def __contains__(self, optype: str):
         return optype in self.type_collection
 
 

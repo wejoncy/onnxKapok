@@ -226,9 +226,10 @@ class ComputeBuffer(object):
 class IRNode:
     def __init__(self):
         self.parent = None
+        self.vectorization = False
 
     @abstractmethod
-    def code_spice(self, var_map: dict = None, indent: int = 0):
+    def code_gen(self, var_map: dict = None, indent: int = 0):
         pass
 
 
@@ -240,6 +241,7 @@ class LoopAttr(Enum):
 
 class Loop(IRNode):
     def __init__(self):
+        super().__init__()
         self.var: sympy.Expr = None
         self.start = sympy.Integer(0)
         self.end = sympy.Integer(0)
@@ -251,21 +253,35 @@ class Loop(IRNode):
         self.attributes = LoopAttr.Parallel
         self.forward_var_set: Dict[ComputeBuffer] = OrderedDict()
 
-    def code_spice(self, var_map: dict, indent: int = 0):
+    def code_gen(self, var_map: dict, indent: int = 0):
+        need_indent = " " * indent
         dec_header = ""
         # forward declaration
+        vec_var = []
         for fvar, buffer in self.forward_var_set.items():
             str_var = str(fvar)
             if buffer.shape is not None and buffer.shape[-1] == 1:
-                dec_header += " " * indent + f"float {var_map[str_var]} = 0.0;\n"
+                dec_header += need_indent + f"float {var_map[str_var]} = 0.0;\n"
+                if self.vectorization:
+                    dec_header += (
+                        need_indent
+                        + f"mipp::Reg<float> vec_{var_map[str_var]} = 0.0;\n"
+                    )
+                    vec_var.append(var_map[str_var])
             else:
+                assert False, "buffer should be defined in the execution-block"
                 dec_header += (
-                    " " * indent
-                    + f"float e_{var_map[str_var]}[{buffer.shape[-1]}] = {{0.0}};\n"
+                    need_indent
+                    + f"float e_{var_map[str_var]}[{buffer.shape[-1]}] __attribute__((aligned(64))) = {{0.0}};\n"
                 )
+
+        ##forward declare vectorization vars
+        v_step = ""
+        if self.vectorization:
+            v_step = "mipp::N<float>()"
         src = dec_header
-        src += " " * indent + f"//@{self.attributes.name}\n"
-        src += " " * indent
+        src += need_indent + f"//@{self.attributes.name}\n"
+        src += need_indent
         if self.parallel:
             p_var = f"{self.var}"
             p_var += (
@@ -273,34 +289,48 @@ class Loop(IRNode):
             )
             src += f"for (int {p_var}={common.SpecialVar().parallel_loop_start}; {p_var}<{common.SpecialVar().parallel_loop_end}; {p_var}+={self.step}){{\n"
             if self.parallel_nest_loop:
-                indents = " " * (indent * 2)
                 src += (
-                    indents
+                    need_indent
                     + f"auto {self.var} = {p_var}/{self.parallel_nest_loop.end};\n"
                 )
                 nest_var = self.parallel_nest_loop.var
                 src += (
-                    indents
+                    need_indent
                     + f"auto {nest_var} = {p_var}%{self.parallel_nest_loop.end};\n"
                 )
         else:
-            src += f"for (int {self.var}={self.start}; {self.var}<{self.end}; {self.var}+={self.step}){{\n"
+            # if self.depth == 0 and self.start == 0:
+            #    if not self.end.is_Number:
+            #        src += f'#pragma omp assume holds({self.end} % 16 == 0 && {self.end} > 0)\n'+need_indent
+            #    src += f'#pragma omp simd\n'+need_indent
+            #    src += f'#pragma vector aligned\n'+need_indent
+            src += f"for (int {self.var}={self.start}; {self.var}<{self.end}; \
+{self.var}+={v_step if self.vectorization else self.step}){{\n"
+
+        var_map["vec_var"] = vec_var
         if isinstance(self.body, list):
             for g in self.body:
-                src += g.code_spice(var_map, indent + 4)
+                src += g.code_gen(var_map, indent + 4)
         else:
-            src += self.body.code_spice(var_map, indent + 4)
-        return src + " " * indent + "}\n"
+            src += self.body.code_gen(var_map, indent + 4)
+        if "vec_var" in var_map:
+            var_map.pop("vec_var")
+        src = src + need_indent + "}\n"
+        for v_var in vec_var:
+            src += need_indent + f"{v_var} = mipp::hadd(vec_{v_var});\n"
+        return src
 
 
 class FunctionNode(IRNode):
     def __init__(self, inputs, outputs):
+        super().__init__()
         self.input = inputs
         self.output = outputs
         self.name: str = ""
         self.const_var = []
         self.shape_var = []
         self.body: List[ExecutionBlock] = None
+        self.hw_context: common.HardwareContext = None
 
     def lower(self):
         assert len(self.body) == 1, "multiple body not supported in function node"
@@ -310,7 +340,7 @@ class FunctionNode(IRNode):
 
         self.body[0].gen_var(self.const_var)
 
-    def code_spice(self, var_map: dict, indent: int = 0):
+    def code_gen(self, var_map: dict, indent: int = 0):
         if not var_map:
             var_map = self.body[0].var_map
         # self.output[0].type.tensor_type.shape.dim[1]
@@ -336,7 +366,7 @@ class FunctionNode(IRNode):
         code = ""
         code += func_signature
         indent += 4
-
+        need_indent = " " * indent
         # DEBUG code
         assert_code = f"""
     #ifdef DEBUG_
@@ -346,18 +376,21 @@ class FunctionNode(IRNode):
     }}
     #endif
 """
+        assert self.hw_context is not None
+        bytes_lanes = self.hw_context.vec_lanes * 4  # (sizeof(float)
+        
         code += assert_code
-
+        restrict = f'__restrict__  __attribute__((aligned ({bytes_lanes})))'
         parse_input = [
-            " " * indent
-            + f"const float* e_{var_map[i.name]} = {common.SpecialVar().input_args}[{idx}];"
+            need_indent
+            + f"const float* {restrict} e_{var_map[i.name]} = {common.SpecialVar().input_args}[{idx}];"
             for idx, i in enumerate(self.input)
         ]
         code += "\n".join(parse_input) + "\n\n"
 
         parse_output = [
-            " " * indent
-            + f"float* e_{var_map[i.name]} = {common.SpecialVar().output_args}[{idx}];"
+            need_indent
+            + f"float* {restrict} e_{var_map[i.name]} = {common.SpecialVar().output_args}[{idx}];"
             for idx, i in enumerate(self.output)
         ]
         code += "\n".join(parse_output) + "\n\n"
@@ -373,26 +406,29 @@ class FunctionNode(IRNode):
                     de_composed_const_var[const.output[0]] = const
             else:
                 de_composed_const_var[const.name] = const
+
         for name, const in de_composed_const_var.items():
             if isinstance(const, onnx.TensorProto):
                 np_array = onnx.numpy_helper.to_array(const).reshape(-1)
-                x_arrstr = np.char.mod("%.6e", np_array)
+                np_array_i32 = np_array.view(np.int32)
+                # x_arrstr = np.char.mod("%.6ef", np_array)
+                x_arrstr = np.char.mod("%#x", np_array_i32)
                 x_str = ",".join(x_arrstr)
-                #################
-                # x_str='0'
-                #################
                 if np_array.size == 1:
-                    const_declare = (
-                        f"static constexpr float e_{var_map[name]} = {x_str};\n"
-                    )
+                    continue
+                    # const_declare = (
+                    #    f"static constexpr float e_{var_map[name]} = {x_str};\n"
+                    # )
                 else:
                     const_declare = (
-                        f"static constexpr float e_{var_map[name]}[] = {{{x_str}}};\n"
+                        f"static constexpr int32_t e_{var_map[name]}_i32p[] __attribute__((aligned({bytes_lanes}))) = {{{x_str}}};\n"
+                        + need_indent
+                        + f"static const float* e_{var_map[name]} = (float*)e_{var_map[name]}_i32p;\n"
                     )
             elif isinstance(const, onnx.NodeProto):
-                if const.attribute[0].type == 2:
+                if const.attribute[0].type == 2:  # int
                     v = const.attribute[0].i
-                    const_declare = f"static constexpr float e_{var_map[name]} = {v};\n"
+                    const_declare = f"static constexpr int e_{var_map[name]} = {v};\n"
                 elif const.attribute[0].type == 1:
                     v = const.attribute[0].f
                     const_declare = (
@@ -402,10 +438,12 @@ class FunctionNode(IRNode):
                     raise Exception("not supported")
             else:
                 raise Exception("not supported")
-            code += " " * indent + const_declare
+            code += need_indent + const_declare
 
-        code += self.body[0].code_spice({}, indent)
-        code += " " * indent + "return 12;\n"
+        self.body[0].hw_context = self.hw_context
+
+        code += self.body[0].code_gen({}, indent)
+        code += need_indent + "return 12;\n"
         code += "}\n"
 
         return code
@@ -413,61 +451,121 @@ class FunctionNode(IRNode):
 
 class ModuleNode(IRNode):
     def __init__(self):
+        super().__init__()
         self.body: List[FunctionNode] = []
+        self.has_vectorization = False
+
 
     def lower(self, function_recipes: list, func: callable):
+        allow_vectorize = True
         for function_recipe in function_recipes:
-            function: FunctionNode = func(*function_recipe)
+            function: FunctionNode = func(*function_recipe, allow_vectorize=allow_vectorize)
             self.body.append(function)
+        self.has_vectorization = allow_vectorize
 
-    def code_spice(self, var_map: dict, indent: int = 0):
-        code = '#include <cmath>\nextern "C"{\n'
+    def code_gen(self, var_map: dict, indent: int = 0):
+        code = """
+#include <cmath>
+"""
+        if self.has_vectorization:
+            code += """
+#include <mipp/mipp.h>
+using namespace mipp;
+"""
+        code += """
+extern "C"{
+"""
 
         for idx, func in enumerate(self.body):
             code += f"//the {idx}th function/sub_graph\n"
-            code += func.code_spice(var_map, indent)
+            code += func.code_gen(var_map, indent)
         # extern C
         code += "}\n"
         return code
 
 
 class ComputeNode(IRNode):
-    def __init__(self, op_type, inputs, outputs):
+    def __init__(self, op_type, inputs, outputs, op_name: str = ""):
+        super().__init__()
         self.op_type_ = op_type
         self.input = inputs
         self.output = outputs
+        self.op_name = op_name
 
     @property
     def op_type(self):
         return self.op_type_
 
     def gen_cpp_code_for_group(self, var_map: dict):
-        named_vars_i = [var_map[i] for i in self.input]
-        named_vars_o = [var_map[i] for i in self.output]
+        ori_named_vars_i = [var_map[i] for i in self.input]
+        ori_named_vars_o = [var_map[i] for i in self.output]
+        suffix = ["", ""]
+
+        named_vars_i = ori_named_vars_i.copy()
+        named_vars_o = ori_named_vars_o.copy()
+
+        for i in range(len(named_vars_i)):
+            # if named_vars_i[i] is constant scalar, just use it
+            if named_vars_i[i] in var_map:
+                named_vars_i[i] = var_map[named_vars_i[i]][0]
+                # without suffix 'f', compiler will see it as double
+                suffix[i] = "f"
+
+        # canonize mul as add
+        if self.op_type == "Sub" and not isinstance(named_vars_i[0], str):
+            named_vars_i[1] = "-" + named_vars_i[1]
+            self.op_type_ = "Add"
+        # always trying to put the constant to the right
+        if suffix[0] == "f" and self.op_type in ["Add", "Mul"]:
+            suffix[0], suffix[1] = suffix[1], suffix[0]
+            named_vars_i[0], named_vars_i[1] = named_vars_i[1], named_vars_i[0]
+
+        named_vars_i[0] = f"{named_vars_i[0]}{suffix[0]}"
+
+        if len(named_vars_i) == 2:
+            raw_named_vars_1 = named_vars_i[1]
+            named_vars_i[1] = f"{named_vars_i[1]}{suffix[1]}"
+            # ",".join(np.char.mod("%.6ef", var_map[named_vars_i[i]]))
+        assert len(named_vars_i) in [1, 2, 3]
         assert len(named_vars_o) == 1
-        assert len(named_vars_o) == 1
+        vectorized_prefix = "mipp::" if self.vectorization else ""
         named_var_o = named_vars_o[0]
         src = "auto "
         if self.op_type == "Add":
-            src += f"{named_var_o} = {named_vars_i[0]} + {named_vars_i[1]};\n"
+            src += f"{named_var_o} = {named_vars_i[0]} + ({named_vars_i[1]});\n"
         elif self.op_type == "Sub":
-            src += f"{named_var_o} = {named_vars_i[0]} - {named_vars_i[1]};\n"
+            src += f"{named_var_o} = {named_vars_i[0]} - ({named_vars_i[1]});\n"
         elif self.op_type == "Div":
-            src += f"{named_var_o} = {named_vars_i[0]} / {named_vars_i[1]};\n"
+            src += f"{named_var_o} = {named_vars_i[0]} / ({named_vars_i[1]});\n"
         elif self.op_type == "Mul":
-            src += f"{named_var_o} = {named_vars_i[0]} * {named_vars_i[1]};\n"
+            src += f"{named_var_o} = {named_vars_i[0]} * ({named_vars_i[1]});\n"
+        elif self.op_type == "Fma":
+            # a*b+c
+            src += f"{named_var_o} = std::fma({named_vars_i[0]}, ({named_vars_i[1]},{named_vars_i[2]}));\n"
         elif self.op_type == "Pow":
-            src += f"{named_var_o} = pow({named_vars_i[0]},{named_vars_i[1]});\n"
+            # rewrite pow as mul
+            if raw_named_vars_1 == 2:
+                src += f"{named_var_o} = {named_vars_i[0]} * {named_vars_i[0]};\n"
+            elif raw_named_vars_1 == 3:
+                src += f"{named_var_o} = {named_vars_i[0]} * {named_vars_i[0]}* {named_vars_i[0]};\n"
+            else:
+                src += f"{named_var_o} = pow({named_vars_i[0]},{named_vars_i[1]});\n"
         elif self.op_type == "Sqrt":
             src += f"{named_var_o} = sqrt({named_vars_i[0]});\n"
         # elif self.op_type == "Cast":
         #    src += f"{named_var_o} = sqrt({named_vars_i[0]});\n"
+        elif self.op_type == "Erf":
+            # 4/sqrt(M_PI) = 7.0898154036220635
+            src += f"{named_var_o} = {vectorized_prefix}tanh({named_vars_i[0]}*({named_vars_i[0]}*{named_vars_i[0]}*0.044715f+0.5f))*7.0898154036220635f;\n"
         else:
             raise Exception("not supported")
         return src
 
-    def code_spice(self, var_map: dict, indent: int = 0):
-        return " " * indent + self.gen_cpp_code_for_group(var_map)
+    def code_gen(self, var_map: dict, indent: int = 0):
+        space_indent = " " * indent
+        src = space_indent + f"// {self.op_name} {self.op_type}\n"
+        src += space_indent + self.gen_cpp_code_for_group(var_map)
+        return src
 
 
 class ReduceNode(ComputeNode):
@@ -477,17 +575,20 @@ class ReduceNode(ComputeNode):
         self.input = body.input
         self.output = body.output
 
-    def code_spice(self, var_map: dict, indent: int = 0):
+    def code_gen(self, var_map: dict, indent: int = 0):
         code = "\n"
         # assert len(self.input) == 1
         # assert len(self.input) == 1 or (self.input[1] == -1)
         if self.body.op_type == "ReduceSum":
             named_var_i = var_map[self.input[0]]
             named_var_o = var_map[self.output[0]]
+            # this var is vectorized, add prefix 'vec_'
+            if named_var_o in var_map["vec_var"]:
+                named_var_o = "vec_" + named_var_o
             if named_var_i != self.input[0]:
                 code += " " * indent + f"// {named_var_i} = {self.input[0]};\n"
                 code += " " * indent + f"// {named_var_o} = {self.output[0]};\n"
-            code += " " * indent + f"{named_var_o} += {named_var_i};\n"
+            code += " " * indent + f"{named_var_o} = {named_var_o}+{named_var_i};\n"
         else:
             raise Exception("not supported")
         return code
@@ -504,7 +605,7 @@ class Indexer:
             stride.append(expand_opt(stride[-1] * shape[i]))
         return stride[::-1]
 
-    def code_spice(self, named_var: str, buf: ComputeBuffer):
+    def code_gen(self, named_var: str, buf: ComputeBuffer):
         if buf.data is not None and buf.data.size == 1:
             return f"{named_var}"
         else:
@@ -534,6 +635,7 @@ class Indexer:
 
 class LoadNode(IRNode):
     def __init__(self, buf: ComputeBuffer):  # ComputeBuffer
+        super().__init__()
         self.from_buf = buf
         self.to_buf = "to"
 
@@ -541,40 +643,68 @@ class LoadNode(IRNode):
     def op_type(self):
         return "Load"
 
-    def code_spice(self, var_map: dict, indent: int = 0):
-        code = " " * indent
+    def code_gen(self, var_map: dict, indent: int = 0):
+        space_indent = " " * indent
+        code = ""
         var_name = self.from_buf.name
         assert var_name in var_map, f"name {var_name} not found in var_map"
         named_var = var_map[var_name]
+        # if named_var is constant, no need to load
+        if named_var in var_map:
+            v = var_map[named_var]
+            assert isinstance(v, (np.ndarray))
+            if self.vectorization:
+                return (
+                    code + space_indent + f"mipp::Reg<float> {named_var} = {v[0]}f;\n"
+                )
+            else:
+                return code + space_indent + f"auto {named_var} = {v[0]}f;\n"
 
         if named_var != var_name:
-            code += f"//load ... {var_name} = {named_var};\n" + " " * indent
-        annotated_var = Indexer().code_spice(named_var, self.from_buf)
-        return code + f"auto {named_var} = e_{annotated_var};\n"
+            code += space_indent + f"//load ... {var_name} = {named_var};\n"
+        annotated_var = Indexer().code_gen(named_var, self.from_buf)
+
+        if named_var in var_map["vec_var"]:
+            named_var = f"vec_{named_var}"
+
+        if self.vectorization:
+            return (
+                code
+                + space_indent
+                + f"mipp::Reg<float> {named_var} = &e_{annotated_var};\n"
+            )
+        else:
+            return code + space_indent + f"auto {named_var} = e_{annotated_var};\n"
 
 
 class StoreNode(IRNode):
     def __init__(self, buf: ComputeBuffer):  # ComputeBuffer
+        super().__init__()
         self.to_var = buf
 
     @property
     def op_type(self):
         return "Store"
 
-    def code_spice(self, var_map: dict, indent: int = 0):
+    def code_gen(self, var_map: dict, indent: int = 0):
         code = ""
+        space_indent = code + " " * indent
         var_name = self.to_var.name
         assert var_name in var_map
         named_var = var_map[var_name]
 
         if named_var != var_name:
             code += " " * indent + f"// store ....{var_name} = {named_var};\n"
-        annotated_var = Indexer().code_spice(named_var, self.to_var)
-        return code + " " * indent + f"e_{annotated_var} = {named_var};\n"
+        annotated_var = Indexer().code_gen(named_var, self.to_var)
+        if self.vectorization:
+            return space_indent + f"{named_var}.store(&e_{annotated_var});\n"
+        else:
+            return space_indent + f"e_{annotated_var} = {named_var};\n"
 
 
 class ExecutionBlock(IRNode):
     def __init__(self, group: List[IRNode]):
+        super().__init__()
         self.input: list[ComputeBuffer] = []
         self.output: list[ComputeBuffer] = []
         self.constant_vars: list[ComputeBuffer] = []
@@ -586,8 +716,9 @@ class ExecutionBlock(IRNode):
         self.type = list(group[0].output_shapes.values())[0][0]
         self.shape = self.extract_shape(group)
         self.var_map = OrderedDict()
-        self.forward_var_set = OrderedDict()
+        self.forward_var_set = [OrderedDict()]
         self.body = None
+        self.hw_context = None
 
         self.group = self.translate(group)
 
@@ -622,7 +753,7 @@ class ExecutionBlock(IRNode):
             loop.attributes = LoopAttr.Vectorization
 
         loop.depth = 0
-        loop.forward_var_set = self.forward_var_set
+        loop.forward_var_set = self.forward_var_set[0]
 
         return loop
 
@@ -653,15 +784,19 @@ class ExecutionBlock(IRNode):
                 name = re.sub(r"[^a-zA-Z0-9]", "_", name)
                 if len(name) > 20:
                     name = name[-20:]
-            if name[0].isdigit():
-                name = "_" + name
+
+            # 1. assure name is legal, not start with digit
+            # 2. assure name is different from the original
+            name = "aot_" + name
             while name in exist_var:
                 name = name + "_1"
+
             exist_var.add(name)
             return name
 
-        for inp in self.forward_var_set:
-            self.var_map[inp] = legal_name(inp)
+        for forward_var_set in self.forward_var_set:
+            for inp in forward_var_set:
+                self.var_map[inp] = legal_name(inp)
         for inp in self.input:
             self.var_map[inp.name] = legal_name(inp.name)
         for out in self.output:
@@ -670,14 +805,45 @@ class ExecutionBlock(IRNode):
             self.var_map[var] = legal_name(var)
         for var in self.load:
             self.var_map[var] = legal_name(var)
+            v = (
+                self.load[var].data.reshape(-1)
+                if self.load[var].data is not None
+                else None
+            )
+            if v is not None and v.size == 1:
+                v_v = self.var_map[var]
+                assert v_v not in self.var_map
+                self.var_map[v_v] = v
 
         for out in external_var:
-            self.var_map[out.name] = legal_name(out.name)
+            var = out.name
+            self.var_map[var] = legal_name(var)
+            if isinstance(out, onnx.NodeProto):
+                v = onnx.numpy_helper.to_array(out.attribute[0].t).reshape(-1)
+                assert v.size == 1, "only support scalar"
+                v_v = self.var_map[var]
+                self.var_map[v_v] = v
 
-    def code_spice(self, var_map: dict, indent: int = 0):
-
+    def code_gen(self, var_map: dict, indent: int = 0):
+        if not var_map:
+            var_map = self.var_map
+        need_indent = " " * indent
         src = ""
-        src += self.body.code_spice(self.var_map, indent)
+        # forward declaration of intermediate buffer for sub-loop for better reuse
+        bytes_lanes = self.hw_context.vec_lanes * 4
+        dec_for_sub_loop = ""
+        if self.forward_var_set:
+            for fvs in self.forward_var_set:
+                for str_var, buffer in tuple(fvs.items()):
+                    if buffer.shape[-1] == 1:
+                        continue
+                    dec_for_sub_loop += (
+                        need_indent
+                        + f"float e_{var_map[str_var]}[{buffer.shape[-1]}] __attribute__((aligned({bytes_lanes}))) = {{0.0}};\n"
+                    )
+                    fvs.pop(str_var)
+        src += dec_for_sub_loop
+        src += self.body.code_gen(self.var_map, indent)
         return src
 
     def lower(self):
@@ -689,11 +855,11 @@ class ExecutionBlock(IRNode):
         new_group = []
         for g in group:
             node = g.current_node
-            ir_node = ComputeNode(node.op_type, node.input, node.output)
+            ir_node = ComputeNode(node.op_type, node.input, node.output, node.name)
             if node in node_sets.ReduceNodeSetInternal():
                 self.has_reduce = True
                 for o in node.output:
-                    self.forward_var_set[o] = ComputeBuffer(
+                    self.forward_var_set[0][o] = ComputeBuffer(
                         name=o, type=g.output_shapes[o][0], shape=g.output_shapes[o][1]
                     )
                 new_group.append(ReduceNode(ir_node))
@@ -721,6 +887,9 @@ class ExecutionBlock(IRNode):
                     load_buf = (
                         self.load[inp] if inp in self.load else None
                     ) or input_name_map[inp]
+                    # we just skip unused load for constant scalar
+                    if load_buf.data is not None and load_buf.data.size == 1:
+                        continue
                     new_group.append(LoadNode(load_buf))
             new_group.append(g)
             for out in g.output:

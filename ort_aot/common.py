@@ -161,3 +161,8 @@ class IndexSubGraph(object):
                 self.input_name_ref_c.pop(ink)
                 if len(consumed_by_name2node[ink]) == v:
                     self.output_name_ref_c.pop(ink)
+
+class HardwareContext(object):
+    def __init__(self, device_id, vec_lanes):
+        self.vec_lanes = vec_lanes
+        self.device_id = device_id
