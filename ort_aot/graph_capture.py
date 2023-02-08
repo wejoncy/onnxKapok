@@ -46,7 +46,7 @@ class CaptureOnnxSubGraph(object):
         self.graph = None
         self.model_proto = None
         self.node_order = dict()
-
+        self.fused_node_nums = 0
         self.in_graph: common.OnnxInGraph = None
 
     def load(self, model_path):
@@ -208,16 +208,18 @@ class CaptureOnnxSubGraph(object):
         #    return True
         return False
 
-    def verify_input_is_not_in_cycle(self, node, all_inputs_in_sub_graph: set, depth=3):
+    def verify_input_is_not_in_cycle(
+        self, node, future_inputs, all_inputs_in_sub_graph: set, depth=13
+    ):
         def verify_internal(in_node: str, i_depth):
             if i_depth == 0:
                 return False
 
             for inp in in_node.input:
-                if self.is_constant_input(inp):
+                if self.is_constant_input(inp) or inp in all_inputs_in_sub_graph:
                     continue
                 if (
-                    inp in all_inputs_in_sub_graph
+                    inp in future_inputs
                     or verify_internal(self.in_graph.produced_by[inp][0], i_depth - 1)
                     is False
                 ):
@@ -227,6 +229,7 @@ class CaptureOnnxSubGraph(object):
         for inp in node.input:
             if (
                 inp in all_inputs_in_sub_graph
+                or inp in future_inputs
                 or self.is_constant_input(inp)
                 or verify_internal(self.in_graph.produced_by[inp][0], depth)
             ):
@@ -243,13 +246,13 @@ class CaptureOnnxSubGraph(object):
         )
         assigned_node_by_name = set()
         available_tensor = set(self.in_graph.graph_input_names)
+        not_available_tensor = set()
 
         def find_sub_graph_by_dfs(
             q_nodes: PriorityQueue,
             sub_graph: common.IndexSubGraph,
         ):
             _, node = q_nodes.get()
-
             if node.name in assigned_node_by_name:
                 return None, None
 
@@ -259,17 +262,22 @@ class CaptureOnnxSubGraph(object):
             #            sub_graph.input_name_exclude_constant.add(name)
             #        sub_graph.input_name_ref_c[name] += 0
 
-            if self.verify_input_is_not_in_cycle(node, available_tensor) is False:
+            if (
+                self.verify_input_is_not_in_cycle(
+                    node, not_available_tensor, available_tensor
+                )
+                is False
+            ):
                 return
 
             assigned_node_by_name.add(node.name)
             sub_graph.sub_graph_nodes.append(node)
 
             for i in node.input:
-                available_tensor.add(i)
+                not_available_tensor.add(i)
 
             for o in node.output:
-                available_tensor.add(o)
+                not_available_tensor.add(o)
 
             new_input_name = []
             connected_node_i = []
@@ -330,7 +338,7 @@ class CaptureOnnxSubGraph(object):
             #    else:
             #        assigned_node_by_name.add(node.name)
 
-        logger.info(f"before fusion, this graph has : {len(self.graph.node)} nodes")
+        node_nums_before_fusion = len(self.graph.node)
         sub_graph_list = []
         sub_model_list = []
         for node in self.graph.node:
@@ -345,6 +353,8 @@ class CaptureOnnxSubGraph(object):
 
                 q_nodes.put((self.node_order[node.name], node))
                 find_sub_graph_by_dfs(q_nodes, sub_graph)
+                available_tensor.update(not_available_tensor)
+                not_available_tensor = set()
                 sub_graph.sub_graph_nodes.sort(key=lambda x: self.node_order[x.name])
                 sub_graph.analyze_input_output(self.in_graph.consumed_by)
 
@@ -376,5 +386,9 @@ class CaptureOnnxSubGraph(object):
             model_with_name[func_name] = sub_model
 
         self.graph.node.sort(key=lambda x: self.node_order[x.name])
-        logger.info(f"after fusion, this graph has : {len(self.graph.node)}  nodes")
+        node_nums_after_fusion = len(self.graph.node)
+        self.fused_node_nums = node_nums_before_fusion - node_nums_after_fusion
+        logger.info(
+            f"after fusion, count of nodes reduces from {node_nums_after_fusion} to {node_nums_after_fusion} "
+        )
         return model_with_name

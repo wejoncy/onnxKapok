@@ -1,9 +1,11 @@
 import sys
-sys.path.insert(0, r"/home/stcadmin/work/onnxruntime/build/py38/Release/build/lib")
+import argparse
+#sys.path.insert(0, r"/home/stcadmin/work/onnxruntime/build/py38/Release/build/lib")
 
 import onnxruntime
 from pathlib import Path
 import shutil
+
 sys.path.append(str(Path(__file__).parent.parent.resolve()))
 from data.get_test_data import (
     get_backbone_onnx_path,
@@ -15,8 +17,10 @@ import numpy as np
 import onnx
 import onnx.numpy_helper
 import ort_aot
-import ort_aot.logger 
+import ort_aot.logger
+
 logger = ort_aot.logger.logger
+
 
 def verify_results(model_file: Path, model_name: str, onnx_bert_model: Path = None):
     """
@@ -27,25 +31,24 @@ def verify_results(model_file: Path, model_name: str, onnx_bert_model: Path = No
     """
     tokenizer, hg_model, _, text = get_tokenizer_and_huggingface_model(model_name)
     encoded_input = tokenizer(*text, return_tensors="pt")
-    
+
     # save input for debug
-    test_data_dir = model_file.parent/"test_data"
+    test_data_dir = model_file.parent / "test_data"
     shutil.rmtree(str(test_data_dir), ignore_errors=True)
     test_data_dir.mkdir(exist_ok=True)
-    
-    for idx,(k,v) in enumerate(encoded_input.items()):
-        input_tensor = onnx.numpy_helper.from_array(
-            v.numpy(), name=k
+
+    for idx, (k, v) in enumerate(encoded_input.items()):
+        input_tensor = onnx.numpy_helper.from_array(v.numpy(), name=k)
+        open(f"{test_data_dir}/input_{idx}.pb", "wb").write(
+            input_tensor.SerializeToString()
         )
-        open(f"{test_data_dir}/input_{idx}.pb", "wb").write(input_tensor.SerializeToString())
-        
+
     transformers.set_seed(42)
-    
-    
+
     aot_model = onnx.load(str(model_file.resolve(strict=True)))
-    aot_model_output= {i.name:i for i in aot_model.graph.output}
+    aot_model_output = {i.name: i for i in aot_model.graph.output}
     del aot_model
-    
+
     session_options = onnxruntime.SessionOptions()
     if onnx_bert_model.exists():
         onnx_model = onnx.load(str(onnx_bert_model.resolve(strict=True)))
@@ -54,7 +57,7 @@ def verify_results(model_file: Path, model_name: str, onnx_bert_model: Path = No
         onnx_model.graph.output.extend(aot_model_output.values())
         session = onnxruntime.InferenceSession(
             onnx_model.SerializePartialToString(),
-            #str(onnx_bert_model.resolve(strict=True)),
+            # str(onnx_bert_model.resolve(strict=True)),
             providers=["CPUExecutionProvider"],
         )
         del onnx_model
@@ -98,7 +101,7 @@ def do_bench(output_model_path: Path, input_model_path: Path, model_name: str):
     encoded_input = tokenizer(*text, return_tensors="np")
 
     session_options = onnxruntime.SessionOptions()
-    #session_options.intra_op_num_threads = 4
+    # session_options.intra_op_num_threads = 4
     # session_options.enable_profiling = True
     # session_options.optimized_model_filepath = "./o3.onnx"
     session_options.log_severity_level = 4
@@ -138,7 +141,7 @@ def do_bench(output_model_path: Path, input_model_path: Path, model_name: str):
 
 
 def run(model_name: str):
-    print(f"benchmark model: >>> {model_name} >>> ", end=': ')
+    print(f"benchmark model: >>> {model_name} >>> ", end=": ")
     bert_onnx_model = get_backbone_onnx_path(model_name)
     output_path = Path(str(bert_onnx_model).replace(".onnx", "_aot.onnx"))
     lib_path = (
@@ -147,17 +150,34 @@ def run(model_name: str):
     if output_path.exists() and lib_path.exists() and False:
         logger.debug("bypass compiling, use cached model")
     else:
-        #ort_aot.debug_model(bert_onnx_model, output_path, lib_path)
+        # ort_aot.debug_model(bert_onnx_model, output_path, lib_path)
         ort_aot.compile_model(bert_onnx_model, output_path, lib_path)
-    #verify_results(output_path, model_name, bert_onnx_model)
+    verify_results(output_path, model_name, bert_onnx_model)
     do_bench(output_path, bert_onnx_model, model_name)
 
 
-if __name__ == "__main__":
-    logger.setLevel(ort_aot.logger.logging.WARNING)
+def main():
+    parser = argparse.ArgumentParser(
+        Path(__file__).parent.name,
+        description=""" .
+        """)
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help="Model type.",
+    )
+    args = parser.parse_args()
+    if not args.verbose:
+        logger.setLevel(ort_aot.logger.logging.WARNING)
+        
     run("google/mobilebert-uncased")
     run("csarron/mobilebert-uncased-squad-v2")
     run("lordtt13/emo-mobilebert")
-    for i in range(100):
-        run("xlm-roberta-base")
-        run("distilbert-base-uncased")
+    run("xlm-roberta-base")
+    run("distilbert-base-uncased")
+        
+
+if __name__ == "__main__":
+    main()
+

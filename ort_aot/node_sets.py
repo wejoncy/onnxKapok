@@ -11,9 +11,11 @@ class ElementWiseNodeSet:
             "Sqrt",
             "Div",
             "Mul",
+            "Exp",
             # "Cast",
             "Erf",
             # "Gelu",
+            "Relu",
         }
     )
 
@@ -75,6 +77,7 @@ class ReduceNodeSetInternal:
             "SumSquare",
             "L1",
             "L2",
+            "Softmax",
         }
     )
 
@@ -91,12 +94,19 @@ class ReduceNodeSet:
         self.produce_by = produce_by
         self.type_collection = ReduceNodeSetInternal().type_collection
 
+    def is_support_Softmax(self, node: onnx.NodeProto):
+        if node.attribute[0].name != "axis" or node.attribute[0].i != -1:
+            return False
+        return True
+
     def __contains__(self, node: onnx.NodeProto):
         if not isinstance(node, onnx.NodeProto):
             if node is not None and not isinstance(node, onnx.ValueInfoProto):
                 raise TypeError("node should be an onnx.NodeProto")
             return False
 
+        if node.op_type == "Softmax":
+            return self.is_support_Softmax(node)
         if not node or node.op_type not in self.type_collection:
             return False
         if len(node.input) > 1:

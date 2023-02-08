@@ -135,6 +135,7 @@ class Schedule(object):
                 continue
             if self.can_fusion_op(bb1.body, bb2.body):
                 bb1.body = self.do_fusion_recursive(bb1.body, bb2.body)
+                bb1.fused_groups.append(bb2.group)
                 self.update_IO_after_fusion_op(bb1, bb2)
 
                 de_blocks.appendleft(bb1)
@@ -162,34 +163,38 @@ class Schedule(object):
                 loop.body = do_tile_loop(loop.body)
                 return loop
 
-            if isinstance(loop.body, list):
-                mutate_body = []
-                for sub_body in loop.body:
-                    if not isinstance(sub_body, lower.Loop):
-                        mutate_body.append(sub_body)
-                        continue
-                    assert sub_body.depth == 0, "only support tile loop with depth 0"
+            list_loop = loop.body if isinstance(loop.body, list) else [loop.body]
+            mutate_body = []
+            for sub_body in list_loop:
+                if not isinstance(sub_body, lower.Loop):
+                    mutate_body.append(sub_body)
+                    continue
+                assert sub_body.depth == 0, "only support tile loop with depth 0"
 
-                    main_loop: lower.Loop = sub_body
+                main_loop: lower.Loop = sub_body
 
-                    main_loop_range = IndexingDiv(
-                        main_loop.end - main_loop.start, sympy_factor
-                    )
-                    offset = main_loop_range * sympy_factor
+                main_loop_range = FloorDiv(
+                    main_loop.end - main_loop.start, sympy_factor
+                )
+                offset = main_loop_range * sympy_factor
 
-                    tail_loop = lower.Loop()
-                    tail_loop.var = main_loop.var
-                    tail_loop.start = offset
-                    tail_loop.end = main_loop.end
-                    tail_loop.body = copy.copy(main_loop.body)
-                    tail_loop.attributes = main_loop.attributes
+                tail_loop = lower.Loop()
+                tail_loop.var = main_loop.var
+                tail_loop.start = offset
+                tail_loop.end = main_loop.end
+                tail_loop.body = copy.deepcopy(main_loop.body)
+                tail_loop.attributes = main_loop.attributes
 
-                    main_loop.end = main_loop.start + offset
-                    if not (sympy.simplify(main_loop.end - main_loop.start) == 0):
-                        mutate_body.append(main_loop)
-                    if not (sympy.simplify(tail_loop.end - tail_loop.start) == 0):
-                        mutate_body.append(tail_loop)
-                loop.body = mutate_body
+                main_loop.end = main_loop.start + offset
+                pre_loop = None
+                if not (sympy.simplify(main_loop.end - main_loop.start) == 0):
+                    mutate_body.append(main_loop)
+                    pre_loop = main_loop
+                if not (sympy.simplify(tail_loop.end - tail_loop.start) == 0):
+                    mutate_body.append(tail_loop)
+                mutate_body.append(lower.PostProcessBlock(pre_loop))
+                mutate_body[-1].global_connections = bb1.connections
+            loop.body = mutate_body
             return loop
 
         blocks[0].body = do_tile_loop(bb1.body)
@@ -214,11 +219,16 @@ class Schedule(object):
                 return loop
 
             if (
-                (loop.end - loop.start) % lanes != 0
+                loop.start != 0
+                # (loop.end - loop.start) % lanes != 0
                 or loop.step != 1
                 or loop.vectorization
                 or loop.parallel
             ):
+                loop.attributes = lower.LoopAttr.ScalarLoop
+                assert (
+                    loop.body[0].vectorization == False
+                ), "op in this loop should not be vectorized"
                 return loop
             loop.vectorization = True
             for op in loop.body:
@@ -390,7 +400,7 @@ class CPPCodeGen(object):
             code = "#include <cstdio>\n#include <cstdlib>\n"
         code_section = []
 
-        code_section.append(module.code_gen({}, 0))
+        code_section.append(module.code_gen(None, 0))
 
         code += "\n\n".join(code_section)
 
@@ -440,7 +450,7 @@ class CppBackend(object):
             "-pipe -finline-functions -fomit-frame-pointer -fno-stack-protector "
             + " -fno-math-errno -fno-trapping-math -fno-common -fgraphite-identity "
             + " -floop-nest-optimize -ftree-loop-distribution "
-            + " -fno-semantic-interposition -fipa-pta -fno-plt "
+            + " -fno-semantic-interposition -fipa-pta -fno-plt -ffast-math"
         )
         try_ld = "-Wl,--strip-all"
         cxx_flag = (
@@ -449,7 +459,12 @@ class CppBackend(object):
         if target == "x86_64":
             CXX = "g++"
         elif target == "aarch64":
-            CXX = "/home/stcadmin/work/andriod/Android/Sdk/ndk/22.0.7026061/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++ --target=aarch64-none-linux-android29 --gcc-toolchain=/home/stcadmin/work/andriod/Android/Sdk/ndk/22.0.7026061/toolchains/llvm/prebuilt/linux-x86_64 --sysroot=/home/stcadmin/work/andriod/Android/Sdk/ndk/22.0.7026061/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+            CXX = (
+                "/home/stcadmin/work/andriod/Android/Sdk/ndk/22.0.7026061/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++ "
+                + " --target=aarch64-none-linux-android29 "
+                + " --gcc-toolchain=/home/stcadmin/work/andriod/Android/Sdk/ndk/22.0.7026061/toolchains/llvm/prebuilt/linux-x86_64 "
+                + " --sysroot=/home/stcadmin/work/andriod/Android/Sdk/ndk/22.0.7026061/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
+            )
         else:
             raise Exception("not support target archtecure yet")
         with tempfile.TemporaryDirectory() as tmpdirname:
