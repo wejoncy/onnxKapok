@@ -16,7 +16,7 @@ on:
 # A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
   # This workflow contains a single job called "build"
-  build:
+  linux_build_and_test:
     # The type of runner that the job will run on
     runs-on: ubuntu-latest
 
@@ -36,8 +36,8 @@ jobs:
       # Runs a single command using the runners shell
       - name: install python package
         run: |
-          python3 install -r requirements.txt
-          python3 install cmake
+          python3 -m pip install -r requirements.txt
+          python3 -m pip install cmake
 
       # Runs a single command using the runners shell
       - name: build
