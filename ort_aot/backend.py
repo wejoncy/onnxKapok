@@ -10,6 +10,7 @@ import tempfile, os
 from pathlib import Path
 import subprocess
 from sympy_utils import *
+import cpufeature
 
 """
 DataType = {
@@ -439,12 +440,25 @@ class CppBackend(object):
         func.lower()
         return func
 
+    def get_simd_intrinsics(self):
+        cpufeat = cpufeature.CPUFeature
+        simd_flag = ""
+        if cpufeat.get("AVX512f", False):
+            simd_flag = "-mavx512f"
+        elif cpufeat.get("AVX2", False):
+            simd_flag = "-mavx2"
+
+        if cpufeat.get("FMA3", False) or cpufeat.get("FMA4", False):
+            simd_flag += " -mfma "
+        return simd_flag
+
     def compile_to_so(self, code: str):
         lib_path = self.lib_path
         target = self.target
         Debug = self.debug_mode
+
         INC_FLAG = Path(".").resolve(strict=True) / "thirdparty/MIPP/install/include/"
-        vec_flag = "-mavx512f"
+        vec_flag = self.get_simd_intrinsics()
         # -fopt-info -fopenmp
         try_flag = (
             "-pipe -finline-functions -fomit-frame-pointer -fno-stack-protector "
@@ -453,9 +467,7 @@ class CppBackend(object):
             + " -fno-semantic-interposition -fipa-pta -fno-plt -ffast-math"
         )
         try_ld = "-Wl,--strip-all"
-        cxx_flag = (
-            f"-std=c++17 -O3 -mfma  {try_flag}  {try_ld} -fPIC {vec_flag} -I{INC_FLAG}"
-        )
+        cxx_flag = f"-std=c++17 -O3 {try_flag}  {try_ld} {vec_flag} -fPIC -I{INC_FLAG}"
         if target == "x86_64":
             CXX = "g++"
         elif target == "aarch64":

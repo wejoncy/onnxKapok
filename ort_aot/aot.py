@@ -41,6 +41,7 @@ def compile_model(
     # assert check, "Simplified ONNX model could not be validated"
     onnx.save(model_simp, output_path)
     logger.info(f"successful compiled to onnx model:{output_path} lib_path:{lib_path}")
+    return capturer.fused_node_nums
 
 
 def debug_model(

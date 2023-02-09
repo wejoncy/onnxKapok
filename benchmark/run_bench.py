@@ -1,10 +1,12 @@
 import sys
 import argparse
+
 #sys.path.insert(0, r"/home/stcadmin/work/onnxruntime/build/py38/Release/build/lib")
 
 import onnxruntime
 from pathlib import Path
 import shutil
+from tabulate import tabulate
 
 sys.path.append(str(Path(__file__).parent.parent.resolve()))
 from data.get_test_data import (
@@ -95,8 +97,32 @@ def verify_results(model_file: Path, model_name: str, onnx_bert_model: Path = No
         f"Results matches:{real_outputs[0]},\ndiff: {real_outputs[matched_idx] - ref_outputs[0]}"
     )
 
+class BenchMarkData(object):
+    def __init__(self, model_name: str, ort_time: float, aot_time: float, reduce_nodes: int):
+        self.model_name = model_name
+        self.ort_time = ort_time
+        self.aot_time = aot_time
+        self.reduce_nodes = reduce_nodes
 
-def do_bench(output_model_path: Path, input_model_path: Path, model_name: str):
+class Statistic(object):
+    __init_flag = False
+    _instance = None
+    def __new__(cls, *args, **kwargs):
+        if cls._instance:
+            return cls._instance
+        else:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+        
+    def __init__(self, data: BenchMarkData = None):
+        if self.__init_flag:
+            if data is not None:
+                self.datas.append(data)
+            return
+        self.__init_flag = True
+        self.datas = [data]
+    
+def do_benchmark(output_model_path: Path, input_model_path: Path, model_name: str) -> list:
     tokenizer, hg_model, _, text = get_tokenizer_and_huggingface_model(model_name)
     encoded_input = tokenizer(*text, return_tensors="np")
 
@@ -134,10 +160,11 @@ def do_bench(output_model_path: Path, input_model_path: Path, model_name: str):
 
     do_bench(session_in)
     do_bench(session_out)
-
+    
     print(
         f"time-cost changes from {c_tc[0]:.6}ms to {c_tc[1]:.6}ms, speedup: {(c_tc[0]-c_tc[1])*100/c_tc[0]:.2f}%"
     )
+    return c_tc
 
 
 def run(model_name: str):
@@ -151,9 +178,10 @@ def run(model_name: str):
         logger.debug("bypass compiling, use cached model")
     else:
         # ort_aot.debug_model(bert_onnx_model, output_path, lib_path)
-        ort_aot.compile_model(bert_onnx_model, output_path, lib_path)
+        fnn = ort_aot.compile_model(bert_onnx_model, output_path, lib_path)
     verify_results(output_path, model_name, bert_onnx_model)
-    do_bench(output_path, bert_onnx_model, model_name)
+    c_tc = do_benchmark(output_path, bert_onnx_model, model_name)
+    Statistic(BenchMarkData(model_name, c_tc[0], c_tc[1], fnn))
 
 
 def main():
@@ -176,6 +204,19 @@ def main():
     run("lordtt13/emo-mobilebert")
     run("xlm-roberta-base")
     run("distilbert-base-uncased")
+    st= Statistic()
+    table_header = ['model_type', 'fused_nodes', 'ort_time', 'aot_time', 'speedup']
+    table_data  = []
+    for data in st.datas:
+        table_data .append((data.model_name, data.reduce_nodes, data.ort_time, data.aot_time, f"{(data.ort_time-data.aot_time)*100/data.ort_time:.6}%"))
+    print(tabulate(table_data, headers=table_header, tablefmt='grid'))
+    
+    result = tabulate(table_data, headers=table_header, tablefmt='pipe')
+    with open(Path(__file__).parent/'benchmark_results.md', 'w') as f:
+        f.write(result)
+    
+       
+
         
 
 if __name__ == "__main__":
