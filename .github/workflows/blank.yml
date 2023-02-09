@@ -22,6 +22,10 @@ jobs:
 
     # Steps represent a sequence of tasks that will be executed as part of the job
     steps:
+      - task: UsePythonVersion@0
+        displayName: Use Python 3.8
+        inputs:
+          versionSpec: 3.8
       # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
       - uses: actions/checkout@v3
         with:
