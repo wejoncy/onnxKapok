@@ -40,7 +40,7 @@ jobs:
           python3 -m pip install cmake
 
       - name: install onnxruntime wiht AotAnyOp
-        run: python3 -m pip install --ignore-installed thirdparty/onnxruntime-1.15.0-cp38-cp38-linux_x86_64.whl
+        run: python3 -m pip install --upgrade --force-reinstall  thirdparty/onnxruntime-1.15.0-cp38-cp38-linux_x86_64.whl
 
 
       # Runs a single command using the runners shell
