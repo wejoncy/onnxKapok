@@ -62,3 +62,9 @@ jobs:
         run: |
           python3 benchmark/run_bench.py
           echo "done".
+          
+      - name: upload benchmark results   
+        uses: actions/upload-artifact@v3
+        with:
+          name: benchmark_table
+          path: benchmark/benchmark_results.md
