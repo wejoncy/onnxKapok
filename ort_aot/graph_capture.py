@@ -12,12 +12,11 @@ import re
 
 import transformers
 
-import lower
 import common
 import backend
 import node_sets
 from logger import logger
-
+import struct
 
 def remove_unused_nodes(model: onnx.ModelProto) -> onnx.ModelProto:
     out_to_node = {}
@@ -97,11 +96,41 @@ class CaptureOnnxSubGraph(object):
             + sub_graph.sub_graph_nodes[-1].name
         )
         func_name = re.sub(r"[^a-zA-Z0-9]", "_", node_name)
+        
+        def legal_shape(x):
+            if isinstance(x, str):
+                return re.sub(r'[^a-zA-Z0-9_]+', '_', x)
+            return str(x)
+        in_symbol_name = OrderedDict()
+        for i0_idx,inp in enumerate(sub_graph.input_name_exclude_constant):
+            for i1_idx,in_sp in enumerate(self.in_graph.tensor_type_shape_info[inp][1]):
+                if isinstance(in_sp, str) and legal_shape(in_sp) not in in_symbol_name:
+                    in_symbol_name[legal_shape(in_sp)] = [len(
+                        in_symbol_name), (i0_idx, i1_idx)]
+        dynamic_shape = []            
+        for shape_symbol,pos in in_symbol_name.items():
+            tb = struct.pack("<ii", *pos[1])
+            tv = struct.unpack("<q", tb)
+            dynamic_shape.append(tv[0])
+                  
+            
         output_shapes = []
-        for x in sub_graph.output_name_ref_c:
-            output_shapes.append(
-                ",".join([str(x1) for x1 in self.in_graph.tensor_type_shape_info[x][1]])
-            )
+        out_symbol_name = []
+
+        for out0_idx,x in enumerate(sub_graph.output_name_ref_c):
+            output_shapes.append([legal_shape(x1) for x1 in self.in_graph.tensor_type_shape_info[x][1]])
+            for in_idx, x1 in enumerate(self.in_graph.tensor_type_shape_info[x][1]):
+                if isinstance(x1, str):
+                    out_sp = legal_shape(x1)
+                    out_symbol_name.append((out0_idx, in_idx, in_symbol_name[out_sp][0]))
+            output_shapes[-1] = ','.join(output_shapes[-1])
+        
+        packed_shape_match_pairs = []
+        for s_m_p in out_symbol_name:
+            tb = struct.pack("<HHHH", *s_m_p, 0)
+            tv = struct.unpack("<q", tb)
+            packed_shape_match_pairs.append(tv[0])
+        
         node = onnx.helper.make_node(
             op_type="AOTanyOp",
             inputs=list(sub_graph.input_name_exclude_constant.keys()),
@@ -112,6 +141,8 @@ class CaptureOnnxSubGraph(object):
             func_type=len(sub_graph.input_name_exclude_constant.keys()),
             lib_path=str(lib_path),
             output_shapes=output_shapes,
+            match_pairs=packed_shape_match_pairs,
+            dynamic_shape=dynamic_shape,
         )
         max_order = max([self.node_order[n.name] for n in sub_graph.sub_graph_nodes])
         self.node_order[node.name] = max_order
@@ -137,8 +168,8 @@ class CaptureOnnxSubGraph(object):
 
         input_name = get_input_name(sub_graph_nodes)
         assert set(input_name) == set(
-            sub_graph.input_name_ref_c.keys()
-        ), "input name not match"
+            sub_graph.input_name_ref_c.keys()) and all(
+                [x in input_name for x in sub_graph.input_name_exclude_constant.keys()]), "input name not match"
         # print(
         #    "graph inputs:",
         #    len(input_name),
@@ -162,6 +193,8 @@ class CaptureOnnxSubGraph(object):
 
         for out, _ in sub_graph.output_name_ref_c.items():
             dtype = type_shape_info[out][0]
+            if type_shape_info[out][1] == [] or (type_shape_info[out][1] == [1] and dtype == 7):
+                return None
             tensor_type = onnx.helper.make_tensor_type_proto(
                 elem_type=dtype, shape=type_shape_info[out][1]
             )
@@ -330,6 +363,9 @@ class CaptureOnnxSubGraph(object):
                     sub_graph.output_name_ref_c[name] = 0
                 sub_graph.output_name_ref_c[name] += 1
 
+                if name in sub_graph.input_name_exclude_constant:
+                    sub_graph.input_name_exclude_constant.pop(name)
+
             while not q_nodes.empty():
                 find_sub_graph_by_dfs(q_nodes, sub_graph)
             # for con_node in connected_node_i + connected_node_o:
@@ -373,7 +409,7 @@ class CaptureOnnxSubGraph(object):
         for idx, (sub_graph, sub_model) in enumerate(
             zip(sub_graph_list, sub_model_list)
         ):
-            # if idx != 1:continue
+            #if idx != 1:continue
             break_f = False
             # bypass Gelu
             for node in sub_graph.sub_graph_nodes:

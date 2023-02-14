@@ -1,305 +1,45 @@
 import common
-import lower
+import ir as Igniter_IR
 from logger import logger
+import cpu
+import triton
+import lowering
 
-from typing import Union, List, Tuple, Dict
+from typing import Union, List, Tuple, Dict, Set
 from collections import defaultdict, deque, OrderedDict
 import copy
-import node_sets
 import tempfile, os
 from pathlib import Path
 import subprocess
 from sympy_utils import *
 import cpufeature
-
-"""
-DataType = {
-    UNDEFINED = 0;
-    // Basic types.
-    FLOAT = 1;   // float
-    UINT8 = 2;   // uint8_t
-    INT8 = 3;    // int8_t
-    UINT16 = 4;  // uint16_t
-    INT16 = 5;   // int16_t
-    INT32 = 6;   // int32_t
-    INT64 = 7;   // int64_t
-    STRING = 8;  // string
-    BOOL = 9;    // bool
-
-    // Advanced types
-    FLOAT16 = 10;
-    DOUBLE = 11;
-    UINT32 = 12;
-    UINT64 = 13;
-    COMPLEX64 = 14;     // complex with float32 real and imaginary components
-    COMPLEX128 = 15;    // complex with float64 real and imaginary components
-    // Future extensions go here.
-  }
-AttributeType {
-    UNDEFINED = 0;
-    FLOAT = 1;
-    INT = 2;
-    STRING = 3;
-    TENSOR = 4;
-    GRAPH = 5;
-    SPARSE_TENSOR = 11;
-    TYPE_PROTO = 13;
-
-    FLOATS = 6;
-    INTS = 7;
-    STRINGS = 8;
-    TENSORS = 9;
-    GRAPHS = 10;
-    SPARSE_TENSORS = 12;
-    TYPE_PROTOS = 14;
-  }
-"""
+import multiprocessing
 
 
-class Schedule(object):
-    def __init__(self):
-        pass
-
-    def can_fusion_op(self, loop1: lower.Loop, loop2: lower.Loop):
-        if (
-            loop1.var != loop2.var
-            or loop1.start != loop2.start
-            or loop1.end != loop2.end
-            or loop1.step != loop2.step
-        ):
-            return False
-        return True
-
-    def do_fusion_recursive(self, loop1: lower.Loop, loop2: lower.Loop):
-        if not self.can_fusion_op(loop1, loop2):
-            raise Exception("can not fusion loop")
-
-        inner_loop1, inner_loop2 = loop1.body, loop2.body
-
-        if loop1.depth < 2:
-            if isinstance(inner_loop1, list):
-                inner_loop1.append(inner_loop2)
-                loop1.body = inner_loop1
-            else:
-                loop1.body = [inner_loop1, inner_loop2]
-            return loop1
-
-        loop1.body = self.do_fusion_recursive(inner_loop1, inner_loop2)
-        return loop1
-
-    def update_IO_after_fusion_op(
-        self, bb1: lower.ExecutionBlock, bb2: lower.ExecutionBlock
-    ):
-        bb1.var_map.update(bb2.var_map)
-        bb2.var_map.clear()
-        bb1.intermediate_var.update(bb2.intermediate_var)
-        bb2.intermediate_var.clear()
-        bb1.load.update(bb2.load)
-        bb2.load.clear()
-
-        tmp_var_but_across_loop = OrderedDict()
-        new_input = set(bb1.input)
-        new_output = set(bb2.output + bb1.output)
-
-        for var in bb2.input:
-            if var in bb1.output:
-                tmp_var_but_across_loop[var.name] = var
-                new_output.remove(var)
-            else:
-                bb2.forward_var_set[-1][var.name] = var
-                # new_input.add(var)
-
-        for k, v in tmp_var_but_across_loop.items():
-            if k not in bb1.forward_var_set[-1]:
-                bb1.forward_var_set[-1][k] = v
-
-        bb1.forward_var_set.extend(bb2.forward_var_set)
-        bb1.output = list(new_output)
-        bb1.input = list(new_input)
-
-    def fusion_op(self, blocks: List[lower.ExecutionBlock]):
-        if len(blocks) < 2:
-            return blocks
-        de_blocks = deque(blocks)
-        new_blocks = []
-        while len(de_blocks) > 1:
-            bb1: lower.ExecutionBlock = de_blocks.popleft()
-            bb2: lower.ExecutionBlock = de_blocks.popleft()
-
-            if not isinstance(bb1.body, lower.Loop):
-                new_blocks.append(bb1)
-                de_blocks.appendleft(bb2)
-                continue
-            if not isinstance(bb2.body, lower.Loop):
-                new_blocks.append(bb1)
-                new_blocks.append(bb2)
-                continue
-            if self.can_fusion_op(bb1.body, bb2.body):
-                bb1.body = self.do_fusion_recursive(bb1.body, bb2.body)
-                bb1.fused_groups.append(bb2.group)
-                self.update_IO_after_fusion_op(bb1, bb2)
-
-                de_blocks.appendleft(bb1)
-            else:
-                new_blocks.append(bb1)
-                de_blocks.appendleft(bb2)
-        new_blocks.extend(de_blocks)
-        return new_blocks
-
-    def tile_inner_loop(
-        self, blocks: List[lower.ExecutionBlock], tile_size: int = 16
-    ) -> List[lower.ExecutionBlock]:
-        assert (
-            len(blocks) == 1
-        ), " only support one block now, but got {} blocks".format(len(blocks))
-        bb1: lower.ExecutionBlock = blocks[0]
-        if not isinstance(bb1.body, lower.Loop):
-            return blocks
-        sympy_factor = sympy.Integer(tile_size)
-
-        def do_tile_loop(loop: lower.Loop):
-            if loop.depth > 1:
-                if isinstance(loop.body, list):
-                    loop.body = [do_tile_loop(i) for i in loop.body]
-                loop.body = do_tile_loop(loop.body)
-                return loop
-
-            list_loop = loop.body if isinstance(loop.body, list) else [loop.body]
-            mutate_body = []
-            for sub_body in list_loop:
-                if not isinstance(sub_body, lower.Loop):
-                    mutate_body.append(sub_body)
-                    continue
-                assert sub_body.depth == 0, "only support tile loop with depth 0"
-
-                main_loop: lower.Loop = sub_body
-
-                main_loop_range = FloorDiv(
-                    main_loop.end - main_loop.start, sympy_factor
-                )
-                offset = main_loop_range * sympy_factor
-
-                tail_loop = lower.Loop()
-                tail_loop.var = main_loop.var
-                tail_loop.start = offset
-                tail_loop.end = main_loop.end
-                tail_loop.body = copy.deepcopy(main_loop.body)
-                tail_loop.attributes = main_loop.attributes
-
-                main_loop.end = main_loop.start + offset
-                pre_loop = None
-                if not (sympy.simplify(main_loop.end - main_loop.start) == 0):
-                    mutate_body.append(main_loop)
-                    pre_loop = main_loop
-                if not (sympy.simplify(tail_loop.end - tail_loop.start) == 0):
-                    mutate_body.append(tail_loop)
-                mutate_body.append(lower.PostProcessBlock(pre_loop))
-                mutate_body[-1].global_connections = bb1.connections
-            loop.body = mutate_body
-            return loop
-
-        blocks[0].body = do_tile_loop(bb1.body)
-        return blocks
-
-    def vectoring_inner_loop(
-        self, blocks: List[lower.ExecutionBlock], lanes: int = 16
-    ) -> List[lower.ExecutionBlock]:
-        assert (
-            len(blocks) == 1
-        ), " only support one block now, but got {} blocks".format(len(blocks))
-        bb1: lower.ExecutionBlock = blocks[0]
-        if not isinstance(bb1.body, lower.Loop):
-            return blocks
-
-        def do_vectoring_loop(loop: lower.Loop):
-            if loop.depth > 0:
-                if isinstance(loop.body, list):
-                    loop.body = [do_vectoring_loop(i) for i in loop.body]
-                else:
-                    loop.body = do_vectoring_loop(loop.body)
-                return loop
-
-            if (
-                loop.start != 0
-                # (loop.end - loop.start) % lanes != 0
-                or loop.step != 1
-                or loop.vectorization
-                or loop.parallel
-            ):
-                loop.attributes = lower.LoopAttr.ScalarLoop
-                assert (
-                    loop.body[0].vectorization == False
-                ), "op in this loop should not be vectorized"
-                return loop
-            loop.vectorization = True
-            for op in loop.body:
-                assert isinstance(
-                    op, lower.IRNode
-                ), f"expected op to be IRNode, but got {type(op)}"
-                op.vectorization = True
-            return loop
-
-        blocks[0].body = do_vectoring_loop(bb1.body)
-        return blocks
-
-    def parallelize_outer_loop(
-        self, blocks: List[lower.ExecutionBlock], parallel_depth: int = 2
-    ) -> List[lower.ExecutionBlock]:
-        assert parallel_depth in [
-            1,
-            2,
-        ], "only support parallelize outer loop with depth 1 or 2"
-        assert (
-            len(blocks) == 1
-        ), " only support one block now, but got {} blocks".format(len(blocks))
-        bb = blocks[0]
-        assert isinstance(bb.body, lower.Loop), "only support parallelize outer loop"
-        assert (
-            bb.body.depth + 1 > parallel_depth
-        ), "parallel depth should be smaller than loop depth"
-        assert (
-            bb.body.start == 0 and bb.body.step == 1
-        ), "only support parallelize natural nest loop"
-
-        bb.body.parallel = True
-
-        if parallel_depth == 2:
-            assert isinstance(
-                bb.body.body, lower.Loop
-            ), "only support parallelize outer loop"
-            loop_depth_out_1 = bb.body
-            loop_depth_out_2 = loop_depth_out_1.body
-            assert (
-                loop_depth_out_2.start == 0 and loop_depth_out_2.step == 1
-            ), "only support parallelize natural nest loop"
-            loop_depth_out_1.body = loop_depth_out_2.body
-            loop_depth_out_1.parallel_nest_loop = loop_depth_out_2
-        else:
-            raise NotImplementedError(
-                "only support parallelize outer loop with depth 1"
-            )
-
-        return blocks
-
-
-class MainFunctionForDebug(lower.IRNode):
-    def __init__(self, func_name: str, in_type_shape: list, out_type_shape: list):
+class MainFunctionForDebug(Igniter_IR.IRNode):
+    def __init__(self, function:Igniter_IR.FunctionNode):
         self.body = None
-        self.func_name = func_name
-        self.in_arg_type_shape = in_type_shape
-        self.out_arg_type_shape = out_type_shape
+        self.func_name = function.name
+        self.in_arg_type_shape = function.input
+        self.out_arg_type_shape = function.output
 
-    def code_gen(self, var_map: dict, indent: int = 0):
+    def code_gen(self, visitor: common.NodeVisitor, var_context: common.CodeGenContext, indent: int = 0):
+        return ''
         in_shapes = [i[1] for i in self.in_arg_type_shape]
         out_shapes = [i[1] for i in self.out_arg_type_shape]
-        in_dynamic_shape_axis = [
-            [idx for idx, i in enumerate(in_shape) if isinstance(i, str)]
-            for in_shape in in_shapes
-        ]
+        
         out_dynamic_shape_axis = [
             [idx for idx, i in enumerate(out_shape) if isinstance(i, str)]
             for out_shape in out_shapes
         ]
+        out_dynamic_shape_symbol = [
+            sp for out_shape in out_shapes for sp in out_shape if isinstance(sp, str)]
+        
+        in_dynamic_shape_axis = [
+            [idx for idx, i in enumerate(in_shape) if isinstance(i, str)]
+            for in_shape in in_shapes if in_shape
+        ]
+        
         assert (
             in_dynamic_shape_axis[0] == out_dynamic_shape_axis[0]
         ), "input and output dynamic shape axis should be same"
@@ -314,6 +54,9 @@ class MainFunctionForDebug(lower.IRNode):
         import numpy as np
 
         for input_shape, in_dy_axis in zip(in_shapes, in_dynamic_shape_axis):
+            if input_shape == []:
+                input_shape=[1]
+                continue
             for dy in in_dy_axis:
                 input_shape[dy] = 24
             if 0 in in_dy_axis:
@@ -391,17 +134,15 @@ class CPPCodeGen(object):
     def __init__(self):
         pass
 
-    def gen_cpp_code(
-        self, module: lower.ModuleNode, global_buffer: common.GraphIOBuffer
-    ):
+    def gen_cpp_code(self, module: Igniter_IR.ModuleNode):
         # generate function header
 
         code = ""
         if isinstance(module.body[-1], MainFunctionForDebug):
             code = "#include <cstdio>\n#include <cstdlib>\n"
         code_section = []
-
-        code_section.append(module.code_gen(None, 0))
+        visitor = cpu.CPUCodeGen()
+        code_section.append(module.code_gen(visitor, {}))
 
         code += "\n\n".join(code_section)
 
@@ -417,20 +158,20 @@ class CppBackend(object):
 
     def lower(
         self,
-        blocks: List[lower.ExecutionBlock],
+        blocks: List[Igniter_IR.ExecutionBlock],
         global_buffer: common.GraphIOBuffer,
         func_name: str,
         allow_vectorize: bool = True,
-    ) -> lower.FunctionNode:
+    ) -> Igniter_IR.FunctionNode:
         for block in blocks:
             block.lower()
         schedule = Schedule()
-        blocks = schedule.fusion_op(blocks)
+        blocks = schedule.fusion_op(blocks, set(i.name for i in global_buffer.var_buffer_out))
         blocks = schedule.tile_inner_loop(blocks, self.context.vec_lanes)
         if allow_vectorize:
             blocks = schedule.vectoring_inner_loop(blocks, self.context.vec_lanes)
         blocks = schedule.parallelize_outer_loop(blocks)
-        func = lower.FunctionNode(
+        func = Igniter_IR.FunctionNode(
             global_buffer.var_buffer_in, global_buffer.var_buffer_out
         )
         func.body = blocks
@@ -498,33 +239,21 @@ class CppBackend(object):
         DEBUG = self.debug_mode
         function_recipes = []
 
-        debug_idx = -1
-        for func_name, model in models_with_name.items():
-            debug_idx += 1
-            # if debug_idx != 1:continue
-            plan = ExecutionPrepare(model)
-            plan.prepare()
-            node_group = plan.create_execution_plan()
-            function_recipe = (node_group, plan.external_buffer, func_name)
-            function_recipes.append(function_recipe)
-
-        module = lower.ModuleNode()
-        module.lower(function_recipes, self.lower)
-
+        module = Igniter_IR.ModuleNode(models_with_name)
+        graph_lower = lowering.GraphLowering()
+        module.lower(graph_lower, self.context)
         if DEBUG:
             # build auto test main function
-            in_arg = [i.name for i in plan.external_buffer.var_buffer_in]
-            out_arg = [i.name for i in plan.external_buffer.var_buffer_out]
-            in_type_shape = [plan.edge_graph.type_and_shape[i] for i in in_arg]
-            out_type_shape = [plan.edge_graph.type_and_shape[i] for i in out_arg]
+            #in_arg = [i.name for i in plan.external_buffer.var_buffer_in]
+            #out_arg = [i.name for i in plan.external_buffer.var_buffer_out]
+            #in_type_shape = [plan.edge_graph.type_and_shape[i] for i in in_arg]
+            #out_type_shape = [plan.edge_graph.type_and_shape[i] for i in out_arg]
             module.body.append(
-                MainFunctionForDebug(func_name, in_type_shape, out_type_shape)
+                MainFunctionForDebug(module.body[-1])
             )
 
         codegen = CPPCodeGen()
-        src_code = codegen.gen_cpp_code(
-            module=module, global_buffer=plan.external_buffer
-        )
+        src_code = codegen.gen_cpp_code(module=module)
 
         with open("code.cc", "w") as f:
             f.write(src_code)
@@ -533,76 +262,3 @@ class CppBackend(object):
 
         # print(src_code)
         return self.lib_path
-
-
-class ExecutionPrepare(object):
-    def __init__(self, model):
-        self.edge_graph: ConnectionGraph = lower.ConnectionGraph(model)
-        self.external_buffer: common.GraphIOBuffer = common.GraphIOBuffer()
-        self.graph_io_name = set()
-
-    def prepare(self):
-        self.edge_graph.build_relationship()
-
-    def topological_with_reduce_last(self):
-        queue = deque()
-        for i in self.edge_graph.entry_nodes:
-            queue.append(i)
-        in_degree = copy.copy(self.edge_graph.in_dgree)
-        # for i in self.edge_graph.node_collection:
-        #    if self.edge_graph.in_dgree[i] == 0:
-        #        queue.append(i)
-        # if not queue:
-        #    raise Exception("no node with in_degree 0")
-
-        reduce_nodes = node_sets.ReduceNodeSet(self.edge_graph.egraph.produced_by)
-        sorted_nodes = []
-
-        def has_non_reduce_child(queue):
-            for n in queue:
-                if n not in reduce_nodes:
-                    return True
-            return False
-
-        while queue:
-            node: Node = queue.popleft()
-            if node.current_node in reduce_nodes and has_non_reduce_child(queue):
-                queue.append(node)
-                continue
-            # print(node.current_node.name)
-            if node.current_node.name not in self.graph_io_name:
-                sorted_nodes.append(node)
-            for n in node.output_nodes:
-                in_degree[n] -= 1
-                if in_degree[n] == 0:
-                    queue.append(n)
-        return sorted_nodes
-
-    def analyze_io_buffer(self, groups):
-        for i in self.edge_graph.model.graph.input:
-            self.external_buffer.var_buffer_in.append(i)
-        for i in self.edge_graph.model.graph.output:
-            self.external_buffer.var_buffer_out.append(i)
-        for i in self.edge_graph.model.graph.initializer:
-            self.external_buffer.const_buffer.append(i)
-        for i in self.edge_graph.constant_nodes.values():
-            self.external_buffer.const_buffer.append(i)
-
-        cached_buffer = OrderedDict()
-        for g in groups:
-            g.analyze_io(self.external_buffer, self.edge_graph, cached_buffer)
-
-    def create_execution_plan(self):
-        for i in self.edge_graph.model.graph.input:
-            self.graph_io_name.add(i.name)
-        for i in self.edge_graph.model.graph.output:
-            self.graph_io_name.add(i.name)
-
-        sorted_nodes = self.topological_with_reduce_last()
-
-        intergroup_st = lower.InterGroupStrategy()
-        node_group = intergroup_st.do_fusion(nodes=sorted_nodes)
-
-        self.analyze_io_buffer(node_group)
-
-        return node_group

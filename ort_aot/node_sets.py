@@ -12,6 +12,7 @@ class ElementWiseNodeSet:
             "Div",
             "Mul",
             "Exp",
+            #"Tanh",
             # "Cast",
             "Erf",
             # "Gelu",
