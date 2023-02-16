@@ -1,3 +1,4 @@
+import numpy
 from collections import defaultdict, OrderedDict
 import onnx
 import copy
@@ -8,6 +9,7 @@ from abc import ABCMeta, abstractmethod
 import logger
 
 _ENABLE_PARALLEL_COMPILE = False
+
 
 class DataType(enum.Enum):
     UNDEFINED = 0
@@ -76,54 +78,41 @@ TENSOR_TYPE_TO_NP_TYPE = {
 NP_TYPE_TO_TENSOR_TYPE = {
     v: k for k, v in TENSOR_TYPE_TO_NP_TYPE.items() if k != onnx.TensorProto.BFLOAT16}
 
-import numpy
 NP_TYPE_C_TYPE = {numpy.bool_: 'bool',
- numpy.byte:
- 'int8_t',
- numpy.ubyte:
- 'uint8_t',
- numpy.short:
- 'short',
- numpy.ushort:
- 'unsigned short',
- numpy.intc:
- 'int',
- numpy.uintc:
- 'unsigned int',
- numpy.int_:
- 'long',
- numpy.uint:
- 'unsigned long',
- numpy.longlong:
- 'long long',
- numpy.ulonglong:
- 'unsigned long long',
- numpy.single:
- 'float',
- numpy.float32:'float',
- numpy.double:
- 'double',
- numpy.longdouble:
- 'long double',
- }
-
+                  numpy.byte:'int8_t',
+                  numpy.ubyte:'uint8_t',
+                  numpy.short:'short',
+                  numpy.ushort:'unsigned short',
+                  numpy.intc:'int',
+                  numpy.uintc:'unsigned int',
+                  numpy.int_:'long',
+                  numpy.int64: 'int64_t',
+                  numpy.uint:'unsigned long',
+                  numpy.longlong:'long long',
+                  numpy.ulonglong:'unsigned long long',
+                  numpy.single:'float',
+                  numpy.float32: 'float',
+                  numpy.double:'double',
+                  numpy.longdouble:'long double',
+                  }
 
 
 class NodeVisitor(object):
     def __init__(self):
         pass
-    
-    #interface for codegen/lowering
+
+    # interface for codegen/lowering
     @abstractmethod
-    def visit(self, node , context, indent: int):
+    def visit(self, node, context, indent: int):
         pass
+
 
 class CodeGenContext(object):
     def __init__(self, var_map: dict):
         self.var_map = var_map
         self.vectorized_var_set: Dict = set()
 
- 
+
 class SpecialVar(object):
     def __init__(self):
         self.input_args = "input_args"
@@ -159,7 +148,7 @@ def get_symbol_shape(model_path):
     return symbol_shape
 
 
-def parse_onnx_to_numpyarray(value):    
+def parse_onnx_to_numpyarray(value):
     data = None
     if isinstance(value, onnx.onnx_ml_pb2.NodeProto):
         assert len(value.attribute) == 1
@@ -274,8 +263,9 @@ class OnnxInGraph(object):
                 self.consumed_by[inp].append(node)
 
         for inp in self.graph.input:
-            self.node_name2module[inp.name] = inp
-        self.graph_input_names.extend([inp.name for inp in self.graph.input])
+            self.node_name2module["out_"+inp.name] = inp
+        self.graph_input_names.extend(
+            ["out_"+inp.name for inp in self.graph.input])
 
         for out in self.graph.output:
             self.node_name2module[

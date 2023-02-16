@@ -41,6 +41,7 @@ def insert_load_and_store(
         new_group.append(g)
         for out in g.output:
             if out in output_name_map and not isinstance(g, ir.ReduceNode):
+                load_cache.add(out)
                 new_group.append(ir.StoreNode(output_name_map[out]))
 
     block.group = new_group
@@ -95,39 +96,41 @@ def analyze_io(
                 outputs.pop(out_name)
 
     for v in outputs:
-        assert v not in cached_buffer, "create buffer twice is not allowed"
-        if "out_" + v in c_graph.egraph.graph_output_names:
-            tensor: onnx.Tensor = c_graph.egraph.node_name2module[
-                "out_" + v
-            ]
-            buffer = utils.convert_onnx_value_to_computebuffer(tensors=tensor)
+        assert v not in cached_buffer and v not in cached_buffer, "create buffer twice is not allowed"        
+        if v in c_graph.egraph.graph_output_names:
+            tensor: onnx.Tensor = c_graph.egraph.node_name2module[v]
+            buffer = utils.convert_onnx_value_to_computebuffer(
+                tensors=tensor, prefix="out_")
+            v = v
         else:
             type_and_shape = c_graph.egraph.tensor_type_shape_info[v]
-            sp = [sympy_utils.sympy_symbol(type_and_shape[1][-1])]
+            last_dim = type_and_shape[1][-1] if type_and_shape[1] else 1
+            sp = [sympy_utils.sympy_symbol(last_dim)]
             dtype = common.TENSOR_TYPE_TO_NP_TYPE[type_and_shape[0]]
             buffer = ir.ComputeBuffer(v, dtype, sp)
         cached_buffer[v] = buffer
         block.output.append(buffer)
 
-    for v in inputs:
+    for v in inputs:        
         if v in external_buffer_out_set:
             # print("intermediate value appears in output, skip load", v)
             # continue
             # if we didn't load it, how can we read the var in the follow-up op?
             pass
         if v in cached_buffer:
-            type_and_shape = c_graph.egraph.tensor_type_shape_info[v]
+            type_and_shape = c_graph.egraph.tensor_type_shape_info[v.replace('out_','')]
             assert (
                 sympy_utils.sympy_symbol(type_and_shape[1][-1])
-                == cached_buffer[v].shape[-1]
+                            == cached_buffer[v].shape[-1]
             ), "???buffer not matched"
             buffer = cached_buffer[v]
-        elif v in c_graph.egraph.graph_input_names:
-            tensor: onnx.Tensor = c_graph.egraph.node_name2module[
-                v
-            ]
-            buffer = utils.convert_onnx_value_to_computebuffer(tensors=tensor)
+        elif  v in c_graph.egraph.graph_input_names:
+            tensor: onnx.Tensor = c_graph.egraph.node_name2module[v]
+            buffer = utils.convert_onnx_value_to_computebuffer(tensors=tensor, prefix="out_")
             cached_buffer[v] = buffer
+        elif  'out_'+v in c_graph.egraph.graph_output_names: # the input is also graph output
+            v= 'out_'+v
+            buffer = cached_buffer[v]
         else:
             buffer = cached_buffer[v]
         # elif v in c_graph.egraph.produced_by:
@@ -188,9 +191,7 @@ class GraphLowering(common.NodeVisitor):
             if allow_vectorize:
                 blocks = schedule.vectoring_inner_loop(blocks, context.vec_lanes)
             blocks = schedule.parallelize_outer_loop(blocks)
-            ins = utils.convert_onnx_value_to_computebuffer(global_buffer.var_buffer_in)
-            outs = utils.convert_onnx_value_to_computebuffer(global_buffer.var_buffer_out)
-            func = ir.FunctionNode(ins, outs)
+            func = ir.FunctionNode(global_buffer.var_buffer_in, global_buffer.var_buffer_out)
             func.body = blocks
             func.const_var = global_buffer.const_buffer
             func.name = func_name
@@ -199,7 +200,7 @@ class GraphLowering(common.NodeVisitor):
             return func
     
         
-        for func_name, model in node.modules.items():
+        for idx,(func_name, model) in enumerate(node.modules.items()):
             plan = execution_planer.ExecutionPrepare(model)
             plan.prepare()
             node_group = plan.create_execution_plan(analyze_io)

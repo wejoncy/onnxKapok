@@ -41,7 +41,8 @@ def remove_unused_nodes(model: onnx.ModelProto) -> onnx.ModelProto:
 
 
 class CaptureOnnxSubGraph(object):
-    def __init__(self):
+    def __init__(self, ort_optimize_first: bool = False):
+        self.ort_optimize_first = ort_optimize_first
         self.graph = None
         self.model_proto = None
         self.node_order = dict()
@@ -49,7 +50,7 @@ class CaptureOnnxSubGraph(object):
         self.in_graph: common.OnnxInGraph = None
 
     def load(self, model_path):
-        if 0:
+        if self.ort_optimize_first:
             session_options = ort.SessionOptions()
             session_options.graph_optimization_level = (
                 ort.GraphOptimizationLevel.ORT_ENABLE_EXTENDED
@@ -193,7 +194,7 @@ class CaptureOnnxSubGraph(object):
 
         for out, _ in sub_graph.output_name_ref_c.items():
             dtype = type_shape_info[out][0]
-            if type_shape_info[out][1] == [] or (type_shape_info[out][1] == [1] and dtype == 7):
+            if type_shape_info[out][1] == [] or (type_shape_info[out][1] == [1] or dtype == 7):
                 return None
             tensor_type = onnx.helper.make_tensor_type_proto(
                 elem_type=dtype, shape=type_shape_info[out][1]
@@ -278,7 +279,7 @@ class CaptureOnnxSubGraph(object):
             node_sets.ReduceNodeSet(self.in_graph.produced_by).type_collection
         )
         assigned_node_by_name = set()
-        available_tensor = set(self.in_graph.graph_input_names)
+        available_tensor = set(i.replace('out_','') for i in self.in_graph.graph_input_names)
         not_available_tensor = set()
 
         def find_sub_graph_by_dfs(

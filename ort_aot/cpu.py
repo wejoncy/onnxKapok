@@ -143,7 +143,7 @@ class CPUCodeGen(common.NodeVisitor):
         assert node.hw_context is not None
         bytes_lanes = node.hw_context.vec_lanes * 4  # (sizeof(float)
 
-        in_dtype = [_get_type(i.dtype)for i in node.input]
+        in_dtype = [_get_type(i.dtype) for i in node.input]
         restrict = f"__restrict__  __attribute__((aligned ({bytes_lanes})))"
         parse_input = [
             need_indent
@@ -191,9 +191,11 @@ class CPUCodeGen(common.NodeVisitor):
                     + f"static const {dtype}* e_{var_map[name]} = ({dtype}*)e_{var_map[name]}_i32p;\n"
                 )
             else:
-                suffix = "f" if np_array.dtype == np.float32 else ""
-                v = np_array.reshape(-1)[0]
-                const_declare = f"static constexpr {dtype} e_{var_map[name]} = {v}{suffix};\n"
+                # we have expanded the const var to scalar
+                continue
+                #suffix = "f" if np_array.dtype == np.float32 else ""
+                #v = np_array.reshape(-1)[0]
+                #const_declare = f"static constexpr {dtype} e_{var_map[name]} = {v}{suffix};\n"
             code += need_indent + const_declare
 
         node.body[0].hw_context = node.hw_context
@@ -226,7 +228,7 @@ extern "C"{
         return code
 
 
-    def ComputeNode(self, node :IRNode, var_context: common.CodeGenContext, indent: int):
+    def ComputeNode(self, node :ComputeNode, var_context: common.CodeGenContext, indent: int):
         def gen_cpp_code_for_op(var_context: common.CodeGenContext):
             var_map = var_context.var_map
             vec_var_map = var_context.vectorized_var_set
@@ -279,7 +281,7 @@ extern "C"{
                 node.op_type_ = "Sqrt"
                 
             # always trying to put the constant to the right
-            if (suffix[0] == "f" or is_input_1_vec) and node.op_type in ["Add", "Mul"]:
+            if (not isinstance(named_vars_i[0], str) or is_input_1_vec) and node.op_type in ["Add", "Mul"]:
                 suffix[0], suffix[1] = suffix[1], suffix[0]
                 named_vars_i[0], named_vars_i[1] = named_vars_i[1], named_vars_i[0]
 

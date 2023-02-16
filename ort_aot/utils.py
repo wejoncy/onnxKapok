@@ -9,7 +9,7 @@ import common
 from typing import List,Union
 
 
-def convert_onnx_value_to_computebuffer(tensors: Union[onnx.ValueInfoProto, List[onnx.ValueInfoProto]]):
+def convert_onnx_value_to_computebuffer(tensors: Union[onnx.ValueInfoProto, List[onnx.ValueInfoProto]], prefix=''):
     not_list= False
     if not isinstance(tensors, list):
         not_list = True
@@ -20,5 +20,5 @@ def convert_onnx_value_to_computebuffer(tensors: Union[onnx.ValueInfoProto, List
             tensor.type)]
         shape = get_shape_from_value_info(tensor)
         shape = sympy_utils.sympy_symbol(shape)
-        bufs.append(ComputeBuffer(tensor.name, dtype, shape))
+        bufs.append(ComputeBuffer(prefix+tensor.name, dtype, shape))
     return bufs if not_list == False else bufs[0]

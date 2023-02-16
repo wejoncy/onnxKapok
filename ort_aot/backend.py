@@ -196,7 +196,7 @@ class CppBackend(object):
     def compile_to_so(self, code: str):
         lib_path = self.lib_path
         target = self.target
-        Debug = self.debug_mode
+        debug_mode = self.debug_mode
 
         INC_FLAG = Path(".").resolve(strict=True) / "thirdparty/MIPP/install/include/"
         vec_flag = self.get_simd_intrinsics()
@@ -230,24 +230,20 @@ class CppBackend(object):
             cmd = f"{CXX} -shared  {cxx_flag}  {o_file} -o {lib_path}  "
             out_str = subprocess.check_output(cmd, shell=True).decode("utf-8")
 
-            if Debug:
+            if debug_mode:
                 cmd = f"{CXX} -g {code_file} -I{INC_FLAG} -o {lib_path}.exe"
                 out_str = subprocess.check_output(cmd, shell=True).decode("utf-8")
             assert lib_path.exists(), "compile failed"
 
     def compile(self, models_with_name: dict):
-        DEBUG = self.debug_mode
+        debug_mode = self.debug_mode
         function_recipes = []
 
         module = Igniter_IR.ModuleNode(models_with_name)
         graph_lower = lowering.GraphLowering()
         module.lower(graph_lower, self.context)
-        if DEBUG:
-            # build auto test main function
-            #in_arg = [i.name for i in plan.external_buffer.var_buffer_in]
-            #out_arg = [i.name for i in plan.external_buffer.var_buffer_out]
-            #in_type_shape = [plan.edge_graph.type_and_shape[i] for i in in_arg]
-            #out_type_shape = [plan.edge_graph.type_and_shape[i] for i in out_arg]
+        if debug_mode:
+            # build a test with main function
             module.body.append(
                 MainFunctionForDebug(module.body[-1])
             )

@@ -3,6 +3,7 @@ from logger import logger
 from ir import ExecutionBlock,ComputeBuffer
 import ir as Igniter_IR
 import de_compose
+import utils
 
 import onnx
 from typing import Union, List, Tuple, Dict, Set
@@ -25,24 +26,30 @@ class Node(object):
     def op_type(self):
         if isinstance(self.current_node, onnx.onnx_ml_pb2.ValueInfoProto):
             return "PlaceHolder"
+        elif isinstance(self.current_node, onnx.onnx_ml_pb2.TensorProto):
+            return "Tensor"
         return self.current_node.op_type
 
     @property
     def name(self):
+        if self.op_type == "PlaceHolder":
+            return 'out_'+self.current_node.name
         return self.current_node.name
 
     def __eq__(self, other):
-        if isinstance(other, str):
+        if id(self) == id(other):
+            return True
+        elif isinstance(other, str):
             return self.name == other
         try:
-            self.current_node.HasField("op_type")
+            assert self.current_node.HasField("op_type")
         except:
             return False
 
-        return self.current_node.op_type == other
+        return self.current_node.op_type == other.op_type and self.current_node.name == other.name
 
     def __hash__(self):
-        return hash(self.current_node.name)
+        return hash(self.name+self.op_type)
 
 
 
@@ -57,20 +64,22 @@ class ConnectionGraph(object):
         self.type_and_shape = OrderedDict()
         self.decompose_dispatcher = de_compose.DecomposeDispatch()
 
-    def get_or_create_gnode(self, node):
-        if node.name not in self.node_2_gnode:
-            self.node_2_gnode[node.name] = Node(node)
+    # God, ORT will produce a weird case: node's name is ame as node's output name
+    def get_or_create_gnode(self, node, prefix=""):
+        name = prefix+node.name
+        if name not in self.node_2_gnode:
+            self.node_2_gnode[name] = Node(node)
             if isinstance(node, onnx.NodeProto):
-                self.node_2_gnode[node.name].input_with_shapes = {
+                self.node_2_gnode[name].input_with_shapes = {
                     inp: self.type_and_shape[inp]
                     for inp in node.input
                     if inp in self.type_and_shape and (inp not in self.egraph.produced_by or self.egraph.produced_by[inp][0].op_type != "Constant")
                 }
-                self.node_2_gnode[node.name].output_with_shapes = {
+                self.node_2_gnode[name].output_with_shapes = {
                     inp: self.type_and_shape[inp] for inp in node.output
                 }
 
-        return self.node_2_gnode[node.name]
+        return self.node_2_gnode[name]
 
     def try_decompose(self, node) -> (list):
         if node in node_sets.ReduceNodeSetInternal():
@@ -116,7 +125,7 @@ class ConnectionGraph(object):
                 if inp in egraph.produced_by:
                     in_gnode = self.get_or_create_gnode(
                         egraph.produced_by[inp][0])
-                    if in_gnode in self.constant_nodes:
+                    if in_gnode.name in self.constant_nodes:
                         gnode.input_constant.append(in_gnode)
                     else:
                         gnode.input_nodes.append(in_gnode)
@@ -125,9 +134,9 @@ class ConnectionGraph(object):
                         egraph.initializer_name2module[inp]
                     )
                     gnode.input_constant.append(in_gnode)
-                elif inp in egraph.graph_input_names:
+                elif "out_" +inp in egraph.graph_input_names:
                     in_gnode = self.get_or_create_gnode(
-                        egraph.node_name2module[inp])
+                        egraph.node_name2module["out_" +inp])
                     in_gnode.output_nodes.append(gnode)
                     self.in_dgree[gnode] += 1
                     gnode.input_nodes.append(in_gnode)
@@ -145,11 +154,14 @@ class ConnectionGraph(object):
                         self.in_dgree[out_gnode] += 1
                 elif "out_" + out in egraph.graph_output_names:
                     out_gnode = self.get_or_create_gnode(
-                        egraph.node_name2module["out_" + out]
+                        egraph.node_name2module["out_" + out], prefix="out_"
                     )
                     out_gnode.input_nodes.append(gnode)
-                    gnode.output_nodes.append(out_gnode)
-                    self.in_dgree[out_gnode] += 1
+                    if gnode != out_gnode:
+                        gnode.output_nodes.append(out_gnode)
+                        self.in_dgree[out_gnode] += 1
+                    else:
+                        print(' ')
                 else:
                     raise Exception("output not found")
         # for inp in egraph.graph_input_names:
@@ -160,12 +172,16 @@ class ConnectionGraph(object):
 
 ################################################################################
 # Node define in execution_planer.py
-def translate_in_out_to_ComputeBuffer(node:Node) -> ComputeBuffer:
+def translate_in_out_to_ComputeBuffer(node:Node, graph_in_set:Set[str], graph_out_set:Set[str]) -> ComputeBuffer:
     input_buffer = []
+    assert isinstance(graph_in_set, set)
+    # input of a node is highly possible to be a graph output
+    graph_io_set = graph_in_set.union(graph_out_set)
     for inp in node.current_node.input:
         if inp in node.input_with_shapes:
+            prefix = "out_" if "out_"+inp in graph_io_set else ""
             input_buffer.append(ComputeBuffer(
-                                name=inp,
+                                name=prefix+inp,
                                 dtype=common.TENSOR_TYPE_TO_NP_TYPE[node.input_with_shapes[inp][0]],
                                 shape=node.input_with_shapes[inp][1]))
         else:
@@ -179,19 +195,22 @@ def translate_in_out_to_ComputeBuffer(node:Node) -> ComputeBuffer:
     output_buffer = []
     for out in node.current_node.output:
         assert out in node.output_with_shapes
+        prefix = "out_" if "out_"+out in graph_out_set else ""
         output_buffer.append(ComputeBuffer(
-            name=out,
+            name=prefix+out,
             dtype=common.TENSOR_TYPE_TO_NP_TYPE[node.output_with_shapes[out][0]],
             shape=node.output_with_shapes[out][1]))
 
     return input_buffer, output_buffer
-# Node define in execution_planer.py
 
 
-def translate(block:ExecutionBlock, group: List[Node]):
+def lower_Node_to_IRNode(block: ExecutionBlock, graph_io:common.GraphIOBuffer):
+    group = block.group
     new_group = []
+    graph_in = set(i.name for i in graph_io.var_buffer_in)
+    graph_out = set(i.name for i in graph_io.var_buffer_out)
     for g in group:
-        in_b, out_b = translate_in_out_to_ComputeBuffer(g)
+        in_b, out_b = translate_in_out_to_ComputeBuffer(g, graph_in, graph_out)
         ir_node = Igniter_IR.ComputeNode(g.op_type, in_b, out_b, g.name)
         node = g.current_node
         if node in node_sets.ReduceNodeSetInternal():
@@ -205,7 +224,6 @@ def translate(block:ExecutionBlock, group: List[Node]):
             new_group.append(ir_node)
     block.fused_groups.append(new_group)
     block.group = new_group
-    
 ################################################################################
 
 
@@ -232,7 +250,7 @@ class InterGroupStrategy(object):
         while len(before_fusion_groups) > 1:
             node1 = before_fusion_groups.popleft()
             node2 = before_fusion_groups.popleft()
-            if self.can_fusion(node1[-1].current_node, node2[-1].current_node):
+            if self.can_fusion(node1[-1], node2[-1]):
                 node1.extend(node2)
                 before_fusion_groups.appendleft(node1)
             else:
@@ -243,7 +261,6 @@ class InterGroupStrategy(object):
         fusion_blocks = []
         for group in after_fusion_groups:
             fusion_blocks.append(ExecutionBlock(group))
-            translate(fusion_blocks[-1], group)
         return fusion_blocks
     
 
@@ -283,7 +300,7 @@ class ExecutionPrepare(object):
                 queue.append(node)
                 continue
             # print(node.current_node.name)
-            if node.current_node.name not in self.graph_io_name:
+            if node.name not in self.graph_io_name:
                 sorted_nodes.append(node)
             for n in node.output_nodes:
                 in_degree[n] -= 1
@@ -296,13 +313,18 @@ class ExecutionPrepare(object):
     def analyze_io_buffer(self, groups, analyze_io:callable):
         type_and_shape = self.edge_graph.type_and_shape
         for i in self.edge_graph.model.graph.input:
-            self.external_buffer.var_buffer_in.append(i)
+            ins = utils.convert_onnx_value_to_computebuffer(i, prefix='out_')
+            self.external_buffer.var_buffer_in.append(ins)
         for i in self.edge_graph.model.graph.output:
-            self.external_buffer.var_buffer_out.append(i)
+            outs = utils.convert_onnx_value_to_computebuffer(i, prefix='out_')
+            self.external_buffer.var_buffer_out.append(outs)
         for i in self.edge_graph.model.graph.initializer:
             self.external_buffer.const_buffer.append(i)
         for i in self.edge_graph.constant_nodes.values():
             self.external_buffer.const_buffer.append(i)
+
+        for block in groups:
+            lower_Node_to_IRNode(block, self.external_buffer)
 
         cached_buffer = OrderedDict()
         for g in groups:
@@ -310,15 +332,14 @@ class ExecutionPrepare(object):
 
     def create_execution_plan(self, analyze_io:callable):
         for i in self.edge_graph.model.graph.input:
-            self.graph_io_name.add(i.name)
+            self.graph_io_name.add('out_'+i.name)
         for i in self.edge_graph.model.graph.output:
-            self.graph_io_name.add(i.name)
+            self.graph_io_name.add('out_'+i.name)
 
         sorted_nodes = self.topological_with_reduce_last()
 
         intergroup_st = InterGroupStrategy()
         node_group = intergroup_st.do_fusion(nodes=sorted_nodes)
-
         self.analyze_io_buffer(node_group, analyze_io)
 
         return node_group

@@ -15,6 +15,7 @@ import onnx.numpy_helper
 
 import node_sets
 
+
 class ComputeBuffer(object):
     def __init__(
         self, name: str, dtype: np.dtype = np.dtype(object), shape: list = None, data: np.ndarray = None
@@ -71,7 +72,7 @@ class IRNode:
     @abstractmethod
     def code_gen(self, visitor: common.NodeVisitor, var_context: common.CodeGenContext, indent: int = 0):
         return visitor.visit(self, var_context, indent)
-    
+
     @abstractmethod
     def lower(self, visitor: common.NodeVisitor, context: common.HardwareContext):
         return visitor.visit(self, context)
@@ -109,6 +110,7 @@ class Loop(IRNode):
         else:
             return str(var)
 
+
 class IoConnection(object):
     def __init__(self):
         self.users = []
@@ -126,7 +128,6 @@ class PostProcessBlock(Loop):
             "ReduceMin": "hmin",
             "ReduceSum": "hadd",
         }
-        
 
 
 class ExecutionBlock(IRNode):
@@ -147,9 +148,9 @@ class ExecutionBlock(IRNode):
         self.body = None
         self.hw_context = None
         self.connections: Dict[str, IoConnection] = OrderedDict()
-        self.fused_groups: List[List[IRNode]]= []
-        
-        self.group = None
+        self.fused_groups: List[List[IRNode]] = []
+
+        self.group = group
 
     def analyze_io_connections(self):
         for group in self.fused_groups:
@@ -260,15 +261,15 @@ class ExecutionBlock(IRNode):
             self.var_map[out.name] = legal_name(out.name)
         for var in self.intermediate_var:
             self.var_map[var] = legal_name(var)
-        for var in self.load:
-            self.var_map[var] = legal_name(var.name)
+        for lvar in self.load:
+            self.var_map[lvar.name] = legal_name(lvar.name)
             v = (
-                self.load[var].data.reshape(-1)
-                if self.load[var].data is not None
+                self.load[lvar].data.reshape(-1)
+                if self.load[lvar].data is not None
                 else None
             )
             if v is not None and v.size == 1:
-                v_v = self.var_map[var]
+                v_v = self.var_map[lvar]
                 assert v_v not in self.var_map
                 self.var_map[v_v] = v
 
@@ -277,9 +278,16 @@ class ExecutionBlock(IRNode):
             self.var_map[var] = legal_name(var)
             if isinstance(out, onnx.NodeProto):
                 v = onnx.numpy_helper.to_array(out.attribute[0].t).reshape(-1)
-                assert v.size == 1, "only support scalar"
-                v_v = self.var_map[var]
-                self.var_map[v_v] = v
+            elif isinstance(out, onnx.TensorProto):
+                v = onnx.numpy_helper.to_array(out).reshape(-1)
+            else:
+                raise NotImplementedError
+            # "only support scalar"
+            if v.size > 1:
+                continue
+            
+            v_v = self.var_map[var]
+            self.var_map[v_v] = v
 
 
 class FunctionNode(IRNode):
@@ -292,7 +300,7 @@ class FunctionNode(IRNode):
         self.shape_var = []
         self.body: List[ExecutionBlock] = None
         self.hw_context: common.HardwareContext = None
-    
+
 
 class ModuleNode(IRNode):
     def __init__(self, modules: Dict[str, onnx.ModelProto]):
@@ -300,31 +308,6 @@ class ModuleNode(IRNode):
         self.body: List[FunctionNode] = []
         self.has_vectorization = False
         self.modules = modules
-
-    def lower_to_functionNode(self,        
-                              blocks: List[ExecutionBlock],
-                              global_buffer: common.GraphIOBuffer,
-                              func_name: str,
-                              context: common.HardwareContext,
-                              allow_vectorize: bool = True):
-        for block in blocks:
-            block.lower()
-        schedule = Schedule()
-        blocks = schedule.fusion_op(blocks, set(i.name for i in global_buffer.var_buffer_out))
-        blocks = schedule.tile_inner_loop(blocks, context.vec_lanes)
-        if allow_vectorize:
-            blocks = schedule.vectoring_inner_loop(blocks, context.vec_lanes)
-        blocks = schedule.parallelize_outer_loop(blocks)
-        func = FunctionNode(
-            global_buffer.var_buffer_in, global_buffer.var_buffer_out
-        )
-        func.body = blocks
-        func.const_var = global_buffer.const_buffer
-        func.name = func_name
-        func.hw_context = context
-        func.lower()
-        return func
-
 
 class ComputeNode(IRNode):
     def __init__(self, op_type, inputs, outputs, op_name: str = ""):
@@ -410,7 +393,6 @@ class StoreNode(IRNode):
     @property
     def op_type(self):
         return "Store"
-
 
 
 class InterGroupStrategy(object):
