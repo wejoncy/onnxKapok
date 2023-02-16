@@ -189,7 +189,11 @@ class OnnxInGraph(object):
 
     @staticmethod
     def get_all_shape_from_onnx_model(model):
-        symbol_shape = get_symbol_shape(model)
+        try:
+            symbol_shape = get_symbol_shape(model)
+        except Exception as e:
+            print(e)
+            symbol_shape = model
         if symbol_shape is not None:
             type_shape_dict = dict()
             for value_info in symbol_shape.graph.value_info:

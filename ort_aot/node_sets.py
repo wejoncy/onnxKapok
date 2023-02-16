@@ -13,10 +13,13 @@ class ElementWiseNodeSet:
             "Mul",
             "Exp",
             #"Tanh",
-            # "Cast",
+            #"Cast",
             "Erf",
-            # "Gelu",
+            #"Gelu",
+            "FastGelu",
             "Relu",
+            #"Equal",
+            #"Not",
         }
     )
 
@@ -79,6 +82,7 @@ class ReduceNodeSetInternal:
             "L1",
             "L2",
             "Softmax",
+            #"LayerNormalization",
         }
     )
 

@@ -71,6 +71,44 @@ def get_tokenizer_and_huggingface_model(model_name):
         )
         text = ("Hello, my dog is cute",)
         text = ("Christening a shock-and-awe short-selling outfit requires more creativity. Hindenburg Research, named after the doomed hydrogen-filled German airship, was founded by Jim Henson in 2017 to hunt for impending corporate disasters, and then hold a torch to them",)
+    elif model_name == "bert-base-uncased":
+        model = transformers.BertForNextSentencePrediction.from_pretrained(
+            model_name
+        )
+        onnx_config = transformers.models.bert.BertOnnxConfig(
+            config, "default"
+        )
+        text = ("Christening a shock-and-awe short-selling outfit requires more creativity. Hindenburg Research, named after the doomed hydrogen-filled German airship, was founded by Jim Henson in 2017 to hunt for impending corporate disasters, and then hold a torch to them",)
+    elif model_name == "microsoft/deberta-base":
+        model = transformers.DebertaForSequenceClassification.from_pretrained(
+            model_name
+        )
+        onnx_config = transformers.models.deberta.DebertaOnnxConfig(
+            config, "sequence-classification"
+        )
+        text = ("Christening a shock-and-awe short-selling outfit requires more creativity. Hindenburg Research, named after the doomed hydrogen-filled German airship, was founded by Jim Henson in 2017 to hunt for impending corporate disasters, and then hold a torch to them",)
+    elif model_name == "gpt2":
+        tokenizer = transformers. GPT2Tokenizer.from_pretrained('gpt2')
+        model = transformers.GPT2LMHeadModel.from_pretrained('gpt2')
+        #model = transformers.GPT2Model.from_pretrained('gpt2')
+        onnx_config = transformers.models.gpt2.GPT2OnnxConfig(
+            config, "sequence-classification"
+        )
+        text = ("Christening a shock-and-awe short-selling outfit requires more creativity. Hindenburg Research, named after the doomed hydrogen-filled German airship, was founded by Jim Henson in 2017 to hunt for impending corporate disasters, and then hold a torch to them",)
+    elif model_name == "valhalla/bart-large-sst2":
+        model = transformers.BartForSequenceClassification.from_pretrained(
+            model_name)
+        onnx_config = transformers.models.bart.BartOnnxConfig(
+            config, "sequence-classification"
+        )
+        text = ("Christening a shock-and-awe short-selling outfit requires more creativity. Hindenburg Research, named after the doomed hydrogen-filled German airship, was founded by Jim Henson in 2017 to hunt for impending corporate disasters, and then hold a torch to them",)
+    elif model_name == "nghuyong/ernie-1.0-base-zh":
+        model = transformers.ErnieForNextSentencePrediction.from_pretrained(
+            model_name)
+        onnx_config = transformers.models.ernie.ErnieOnnxConfig(
+            config, "sequence-classification"
+        )
+        text = ("Christening a shock-and-awe short-selling outfit requires more creativity. Hindenburg Research, named after the doomed hydrogen-filled German airship, was founded by Jim Henson in 2017 to hunt for impending corporate disasters, and then hold a torch to them",)
     else:
         raise ValueError(f"{model_name} is not supported")
     return tokenizer, model, onnx_config, text
@@ -91,7 +129,7 @@ def export_backbone_or_existed(model_name: str):
     tokenizer, model, onnx_config, text = get_tokenizer_and_huggingface_model(
         model_name
     )
-    inputs = tokenizer(*text, return_tensors="pt")
+    inputs = tokenizer(*text, return_tensors="np")
 
     save_bert_onnx = True
     # tempfile will be removed automatically

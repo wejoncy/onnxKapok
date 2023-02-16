@@ -193,8 +193,9 @@ class CaptureOnnxSubGraph(object):
             onnx_sub_graph.input.append(onnx.helper.make_value_info(inp, tensor_type))
 
         for out, _ in sub_graph.output_name_ref_c.items():
-            dtype = type_shape_info[out][0]
-            if type_shape_info[out][1] == [] or (type_shape_info[out][1] == [1] or dtype == 7):
+            dtype = type_shape_info[out][0] if out in type_shape_info else 0 # unkown dtype
+            shape = type_shape_info[out][1] if out in type_shape_info else []
+            if shape == [] or (shape == [1] or dtype == 7):
                 return None
             tensor_type = onnx.helper.make_tensor_type_proto(
                 elem_type=dtype, shape=type_shape_info[out][1]
@@ -206,6 +207,8 @@ class CaptureOnnxSubGraph(object):
             if name not in sub_graph.input_name_exclude_constant:
                 if name in self.in_graph.produced_by:
                     onnx_sub_graph.node.extend(self.in_graph.produced_by[name])
+                elif 'out_'+name in self.in_graph.graph_input_names:
+                    pass
                 else:
                     onnx_sub_graph.initializer.append(
                         self.in_graph.initializer_name2module[name]
@@ -341,11 +344,16 @@ class CaptureOnnxSubGraph(object):
                     pre_nodes = self.in_graph.produced_by[name]
                     if pre_nodes[0].op_type != "Constant":
                         new_input_name.append(name)
+                # we should support the case that the input is a graph input
+                elif 'out_' + name in self.in_graph.graph_input_names:
+                    new_input_name.append(name)
+
+
 
             for v in new_input_name:
                 sub_graph.input_name_exclude_constant[v] = 0
 
-            if len(sub_graph.input_name_exclude_constant) > 4:
+            if len(sub_graph.input_name_exclude_constant) > 14:
                 return
 
             connected_node_o = []
@@ -364,8 +372,11 @@ class CaptureOnnxSubGraph(object):
                     sub_graph.output_name_ref_c[name] = 0
                 sub_graph.output_name_ref_c[name] += 1
 
+                # if a input is produced by this subgraph, then we need to remove it from graph input
                 if name in sub_graph.input_name_exclude_constant:
                     sub_graph.input_name_exclude_constant.pop(name)
+                if name in sub_graph.input_name_ref_c:
+                    sub_graph.input_name_ref_c.pop(name)
 
             while not q_nodes.empty():
                 find_sub_graph_by_dfs(q_nodes, sub_graph)

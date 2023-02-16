@@ -14,7 +14,6 @@ import transformers
 import sys
 
 sys.path.append(str(Path(__file__).parent.resolve()))
-import lower
 import common
 from backend import CppBackend
 import node_sets
@@ -25,9 +24,11 @@ from logger import logger
 # target = "x86_64"
 # target = "aarch64"
 def compile_model(
-    model_path: Path, output_path: Path, lib_path: Path, target: str = "x86_64"
+    model_path: Path, output_path: Path, lib_path: Path, target: str = "x86_64", ort_optimize_first: bool = False
 ):
-    capturer = graph_capture.CaptureOnnxSubGraph()
+    output_path.unlink(missing_ok=True)
+    lib_path.unlink(missing_ok=True)
+    capturer = graph_capture.CaptureOnnxSubGraph(ort_optimize_first)
     model_with_name = capturer.run(model_path, lib_path)
     cpp_backend = CppBackend(lib_path, target)
     cpp_backend.compile(model_with_name)
@@ -98,6 +99,8 @@ def test_lib(onnx_model_map: dict, lib_path: Path):
         [i.dim_param or i.dim_value for i in out.type.tensor_type.shape.dim]
         for out in onnx_model.graph.output
     ]
+    output_shapes[0][0] = 'batch'
+    input_shapes[1][0] = 'batch'
 
     in_dynamic_shape_axis = [
         [idx for idx, i in enumerate(in_shape) if isinstance(i, str)]
@@ -108,6 +111,9 @@ def test_lib(onnx_model_map: dict, lib_path: Path):
         for out_shape in output_shapes
     ]
     for input_shape, in_dy_axis in zip(input_shapes, in_dynamic_shape_axis):
+        if input_shape == []:
+            input_shape.append(1)
+            continue
         for dy in in_dy_axis:
             input_shape[dy] = 24
         if 0 in in_dy_axis:
@@ -309,7 +315,19 @@ def topological_by_level():
 
 
 if __name__ == "__main__":
-    model_path = "../temp_host/lordtt13_emo_mobilebert.onnx"
+    model_path = Path("../temp_host/lordtt13_emo_mobilebert.onnx")
+    model_path = Path("data/roberta_execution.onnx")
     # model_path = "../temp_host/xlm-roberta-base.onnx"
     # model_path = "distilbert-base-uncased-finetuned-sst-2-english.onnx"
-    debug_model(model_path)
+    output_path = model_path.with_suffix('').with_suffix('._aot.onnx')
+    lib_path = model_path.with_suffix('').with_suffix('.aot.so')
+    debug_model(model_path, output_path, lib_path)
+
+
+# TODO
+'''
+1. [x] better Symbolic Shape representation, especially for subgraph shape inference in ORT OP
+2. [] re-compose ops like gelu
+3. [] support data-movement ops, such as transpose, permute, slice gather in condition, and matmul
+4. [] masked vectorization
+'''

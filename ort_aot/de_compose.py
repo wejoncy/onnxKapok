@@ -17,6 +17,63 @@ class DecomposeDispatch(object):
             )
         return getattr(self, node.op_type)(node, *args, **kwargs)
 
+    def LayerNormalization(self, node: onnx.NodeProto, **kwargs):
+        assert False, "Not implemented yet"
+        axis = node.attribute[0].i
+        name = node.name
+        axes_out = self.get_unique_var_name("axes_in_softmax")
+        axes_v = onnx.helper.make_tensor(
+            name="axes",
+            data_type=onnx.TensorProto.INT64,
+            dims=(1,),
+            vals=np.array([axis]),
+        )
+        axes_node = onnx.helper.make_node(
+            "Constant",
+            [],
+            [axes_out],
+            f"axes_in_reduceMean_{node.name}",
+            value=axes_v,
+        )
+        
+        max_out = self.get_unique_var_name("sft_max_out")
+        max_node = onnx.helper.make_node(
+            "ReduceMax",
+            [node.input[0]],#axes_out
+            [max_out],
+            f"{name}_max",
+            axis=axis,            
+        )
+        sub_out = self.get_unique_var_name("sft_sub_out")
+        sub_node = onnx.helper.make_node(
+            "Sub",
+            [node.input[0], max_out],
+            [sub_out],
+            f"{name}_sub",
+        )
+        exp_out = self.get_unique_var_name("sft_exp_out")
+        exp_node = onnx.helper.make_node(
+            "Exp",
+            [sub_out],
+            [exp_out],
+            f"{name}_exp",
+        )
+        sum_out = self.get_unique_var_name("sft_sum_out")
+        sum_node = onnx.helper.make_node(
+            "ReduceSum",
+            [exp_out, axes_out],
+            [sum_out],
+            f"{name}_sum",
+        )
+
+        div_node = onnx.helper.make_node(
+            "Div",
+            [exp_out, sum_out],
+            node.output,
+            f"sum/decomposed_from_{node.name}",
+        )
+        return [axes_node, max_node, sub_node, exp_node, sum_node, div_node]
+
     def Softmax(self, node:onnx.NodeProto, **kwargs):
         axis = node.attribute[0].i
         name = node.name
