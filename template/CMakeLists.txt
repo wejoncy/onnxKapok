@@ -34,6 +34,7 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} {EXTRA_CXX_FLAGS}")
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${PROJECT_SOURCE_DIR}/build/)
 set(MIPP_INCLUDE_DIR {TPT_DIR}/thirdparty/MIPP/install/include)
 include_directories(${MIPP_INCLUDE_DIR})
+include_directories({TPT_DIR}/template)
 
 set(srcs "code.cc")
 set(target "code")

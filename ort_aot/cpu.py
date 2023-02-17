@@ -188,7 +188,7 @@ class CPUCodeGen(common.NodeVisitor):
                 const_declare = (
                     f"static constexpr uint32_t e_{var_map[name]}_u32p[] __attribute__((aligned({bytes_lanes}))) = {{{x_str}}};\n"
                     + need_indent
-                    + f"static const {dtype}* e_{var_map[name]} = ({dtype}*)e_{var_map[name]}_u32p;\n"
+                    + f"static const {dtype}* e_{var_map[name]} = (const {dtype}*)e_{var_map[name]}_u32p;\n"
                 )
             else:
                 # we have expanded the const var to scalar
@@ -214,6 +214,7 @@ class CPUCodeGen(common.NodeVisitor):
         if node.has_vectorization:
             code += """
 #include <mipp/mipp.h>
+#include <fast_math.h>
 using namespace mipp;
 """
         code += """
@@ -323,12 +324,15 @@ extern "C"{
             # elif node.op_type == "Cast":
             #    src += f"{named_var_o} = sqrt({named_vars_i[0]});\n"
             elif node.op_type == "Erf":
-                # 4/sqrt(M_PI) = 7.0898154036220635
-                src += f"{named_var_o} = {vectorized_prefix}tanh({named_vars_i[0]}*({named_vars_i[0]}*{named_vars_i[0]}*0.044715f+0.5f))*7.0898154036220635f;\n"
+                # 2/sqrt(M_PI) = 1.1283791671f
+                src += f"{named_var_o} = tanh_mlas({named_vars_i[0]}*({named_vars_i[0]}*{named_vars_i[0]}*2*0.044715f+1.f)*1.1283791671f);\n"
+            elif node.op_type == "Gelu":
+                # sqrt(2/M_PI) = 0.7978845608f
+                src += f"{named_var_o} = {named_vars_i[0]}*(tanh_mlas( ({named_vars_i[0]}*({named_vars_i[0]}* {named_vars_i[0]}*0.044715f+1.0f) *0.7978845608f ))+1.0f)*0.5f;\n"
             elif node.op_type == "Exp":
                 src += f"{named_var_o} = {vectorized_prefix}exp({named_vars_i[0]});\n"
             elif node.op_type == "Tanh":
-                src += f"{named_var_o} = {vectorized_prefix}tanh({named_vars_i[0]});\n"
+                src += f"{named_var_o} = tanh_mlas({named_vars_i[0]});\n"
             else:
                 raise Exception(f"not supported {node.op_type}")
             return src

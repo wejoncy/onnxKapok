@@ -97,17 +97,51 @@ class ConnectionGraph(object):
             graph.node.remove(node)
             graph.node.extend(r_nodes)
 
-    def try_recompose(self, node) -> (list):
-        return []
+    def try_recompose(self, node:onnx.NodeProto, egraph:common.OnnxInGraph) -> (list):
+        assert node.op_type == "Erf"
+        if len(node.input) != 1:
+            return []
+        if len(node.output) != 1:
+            return []
+        input_div_node = egraph.produced_by[node.input[0]][0]
+        if input_div_node.op_type != "Div" :
+            return []
+        if len(egraph.consumed_by[node.output[0]]) != 1:
+            return []
+        output_add_node = egraph.consumed_by[node.output[0]][0]
+        if output_add_node.op_type != "Add":
+            return []
+        output_mul_node = egraph.consumed_by[output_add_node.output[0]][0]
+        if output_mul_node.op_type != "Mul" or(input_div_node.input[0] not in output_mul_node.input):
+            return []
+        mul_0_5_node = egraph.consumed_by[output_mul_node.output[0]][0]
+        if mul_0_5_node.op_type != "Mul":
+            return []
+        gelu_node = onnx.helper.make_node("Gelu", [input_div_node.input[0]], [mul_0_5_node.output[0]])
+        return ([input_div_node, node, output_add_node, output_mul_node, mul_0_5_node], gelu_node)
 
     # TODO: implement recompose, Gelu, the reason is Gelu has a Fast algorithm.
-    def recompose(self, graph):
-        pass
+    def recompose(self, egraph:common.OnnxInGraph):
+        replace_nodes = {}
+        graph:onnx.GraphProto = egraph.graph
+        erf_bool = ['Erf' in node.op_type for node in graph.node]
+        erf_index = erf_bool.index(True) if True in erf_bool else -1
+        if erf_index>= 0:
+            assert sum(erf_bool) == 1, "not support multiple erf node"
+            egraph.gen_name2module_map(False)
+            node= graph.node[erf_index]
+            r_nodes, new_node = self.try_recompose(node, egraph)
+            if r_nodes:
+                replace_nodes[node.name] = (r_nodes, new_node)
+        for r_nodes, node in replace_nodes.values():
+            for t_b_n in r_nodes:
+                graph.node.remove(t_b_n)
+            graph.node.append(node)
 
     def build_relationship(self):
         self.egraph = common.OnnxInGraph(self.model)
         self.decompose(self.egraph.graph)
-        self.recompose(self.egraph.graph)
+        self.recompose(self.egraph)
         self.egraph.gen_name2module_map()
         egraph = self.egraph
         self.type_and_shape = egraph.tensor_type_shape_info

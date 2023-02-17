@@ -237,7 +237,17 @@ class OnnxInGraph(object):
 
         return type_shape_dict, runtime_shape
 
-    def gen_name2module_map(self):
+    def gen_name2module_map(self, infer_shape=True):
+        self.initializer_name2module.clear()
+        self.value_info_map.clear()
+        self.node_name2module.clear()
+        self.produced_by.clear()
+        self.consumed_by.clear()
+        self.graph_input_names.clear()
+        self.graph_output_names.clear()
+        self.graph_input_names.clear()
+        self.graph_input_names.clear()
+
         for vi in self.graph.value_info:
             self.value_info_map[vi.name] = vi
         # initializer name => initializer
@@ -277,10 +287,11 @@ class OnnxInGraph(object):
             ] = out  # add `out_` in case the output has the same name with the last node
         self.graph_output_names = [
             "out_" + out.name for out in self.graph.output]
-        symbol_shape, rt_shape = self.get_all_shape_from_onnx_model(
-            self.model_proto)
-        self.tensor_type_shape_info.update(symbol_shape)
-        self.rt_shape = rt_shape
+        if infer_shape:
+            symbol_shape, rt_shape = self.get_all_shape_from_onnx_model(
+                self.model_proto)
+            self.tensor_type_shape_info = symbol_shape
+            self.rt_shape = rt_shape
 
 
 class GraphIOBuffer(object):
