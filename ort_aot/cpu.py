@@ -118,11 +118,11 @@ class CPUCodeGen(common.NodeVisitor):
         # in_param = [f"const float* e_{var_map[i.name]}" for i in node.input]
 
         in_param = [
-            f"const void** {common.SpecialVar().input_args} ",
+            f"const void** {common.SpecialVar().input_args}",
         ]
         if node.body[0].body.parallel:
             in_param += [
-                f"ptrdiff_t  {common.SpecialVar().parallel_loop_start}, ptrdiff_t {common.SpecialVar().parallel_loop_end}"
+                f" ptrdiff_t  {common.SpecialVar().parallel_loop_start}, ptrdiff_t {common.SpecialVar().parallel_loop_end}"
             ]
 
         in_param += [f"const int64_t* {common.SpecialVar().dynamic_shape_args}"]
@@ -181,14 +181,14 @@ class CPUCodeGen(common.NodeVisitor):
             np_array = common.parse_onnx_to_numpyarray(const)
             dtype = common.NP_TYPE_C_TYPE[np_array.dtype.type]
             if np_array.size > 1:
-                np_array_i32 = np_array.view(np.int32)
-                x_arrstr = np.char.mod("%#x", np_array_i32)
+                np_array_u32 = np_array.view(np.uint32)
+                x_arrstr = np.char.mod("%#x", np_array_u32)
                 x_str = ",".join(x_arrstr)
                 dtype = common.NP_TYPE_C_TYPE[np_array.dtype.type]
                 const_declare = (
-                    f"static constexpr int32_t e_{var_map[name]}_i32p[] __attribute__((aligned({bytes_lanes}))) = {{{x_str}}};\n"
+                    f"static constexpr uint32_t e_{var_map[name]}_u32p[] __attribute__((aligned({bytes_lanes}))) = {{{x_str}}};\n"
                     + need_indent
-                    + f"static const {dtype}* e_{var_map[name]} = ({dtype}*)e_{var_map[name]}_i32p;\n"
+                    + f"static const {dtype}* e_{var_map[name]} = ({dtype}*)e_{var_map[name]}_u32p;\n"
                 )
             else:
                 # we have expanded the const var to scalar
@@ -463,9 +463,10 @@ extern "C"{
                         fvs.pop(str_var)
                         continue
                     var_declared.add(str_var)
+                    initialize_assign = f'= {{0.0}}' if buffer.shape[-1].is_number else ''
                     dec_for_sub_loop += (
                         need_indent
-                        + f"float e_{var_map[str_var]}[{buffer.shape[-1]}] __attribute__((aligned({bytes_lanes}))) = {{0.0}};\n"
+                        + f"float e_{var_map[str_var]}[{buffer.shape[-1]}] __attribute__((aligned({bytes_lanes}))) {initialize_assign};\n"
                     )
                     fvs.pop(str_var)
         src += dec_for_sub_loop

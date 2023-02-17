@@ -12,8 +12,10 @@ import tempfile, os
 from pathlib import Path
 import subprocess
 from sympy_utils import *
+import utils
 import cpufeature
 import multiprocessing
+import shutil
 
 
 class MainFunctionForDebug(Igniter_IR.IRNode):
@@ -24,7 +26,7 @@ class MainFunctionForDebug(Igniter_IR.IRNode):
         self.out_arg_type_shape = function.output
 
     def code_gen(self, visitor: common.NodeVisitor, var_context: common.CodeGenContext, indent: int = 0):
-        return ''
+        return 'int main(){return 0;}\n'
         in_shapes = [i[1] for i in self.in_arg_type_shape]
         out_shapes = [i[1] for i in self.out_arg_type_shape]
         
@@ -209,31 +211,63 @@ class CppBackend(object):
         )
         try_ld = "-Wl,--strip-all"
         cxx_flag = f"-std=c++17 -O3 {try_flag}  {try_ld} {vec_flag} -fPIC -I{INC_FLAG}"
-        if target == "x86_64":
-            CXX = "g++"
-        elif target == "aarch64":
-            CXX = (
-                "/home/stcadmin/work/andriod/Android/Sdk/ndk/22.0.7026061/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++ "
-                + " --target=aarch64-none-linux-android29 "
-                + " --gcc-toolchain=/home/stcadmin/work/andriod/Android/Sdk/ndk/22.0.7026061/toolchains/llvm/prebuilt/linux-x86_64 "
-                + " --sysroot=/home/stcadmin/work/andriod/Android/Sdk/ndk/22.0.7026061/toolchains/llvm/prebuilt/linux-x86_64/sysroot"
-            )
+
+
+        cmake_args = ['-DWITH_DEBUG_EXE='+ ("ON" if debug_mode else "OFF")]
+        cmake_replace_rules = {'{EXTRA_CXX_FLAGS}': '-march=native' if target == "x86_64" else '',
+                               '{TPT_DIR}': str(Path(".").resolve(strict=True))}
+
+        if target == "x86_64":  # -march=native
+            cmake_args += ['-DCMAKE_BUILD_TYPE=Release']
+        elif target in ["arm64-v8a", "armeabi-v7a"]:
+            assert os.getenv('ANDROID_NDK'), "Please set ANDROID_NDK environment variable"
+            cmake_args += ['-DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake',
+            f'-DANDROID_ABI={target}',
+            '-DANDROID_NATIVE_API_LEVEL=android-26',
+            '-DANDROID_ARM_NEON=TRUE',
+            '-DCMAKE_BUILD_TYPE=Release']
         else:
             raise Exception("not support target archtecure yet")
+
         with tempfile.TemporaryDirectory() as tmpdirname:
-            code_file = os.path.join(tmpdirname, "code.cpp")
+            tmp_dir = Path(tmpdirname)
+            cmake_file = tmp_dir/"CMakeLists.txt"
+            code_file = tmp_dir/"code.cc"
+            build_dir = tmp_dir / "build"
+            build_dir.mkdir()
             with open(code_file, "w") as f:
                 f.write(code)
-            o_file = os.path.join(tmpdirname, "code.o")
-            cmd = f"{CXX} {cxx_flag} -c {code_file}  -o {o_file}"
-            out_str = subprocess.check_output(cmd, shell=True).decode("utf-8")
-            cmd = f"{CXX} -shared  {cxx_flag}  {o_file} -o {lib_path}  "
-            out_str = subprocess.check_output(cmd, shell=True).decode("utf-8")
+            with open(cmake_file, "w") as f:
+                with open(Path(__file__).parent.parent / "template/CMakeLists.txt", "r") as f2:
+                    cmake_template = f2.read()
+                    for k,v in cmake_replace_rules.items():
+                        cmake_template = cmake_template.replace(k, v)
+                    f.write(cmake_template)
 
-            if debug_mode:
-                cmd = f"{CXX} -g {code_file} -I{INC_FLAG} -o {lib_path}.exe"
-                out_str = subprocess.check_output(cmd, shell=True).decode("utf-8")
-            assert lib_path.exists(), "compile failed"
+            with utils.DirContext(build_dir):
+                out_str = subprocess.check_output(f'cmake ..  {" ".join(cmake_args)} ',shell=True).decode("utf-8")
+                logger.debug(msg=f"cmake output: {out_str}")
+                out_str = subprocess.check_output(f"make", shell=True).decode("utf-8")
+                logger.debug(msg=f"make output: {out_str}")
+                shutil.copyfile(build_dir/"libcode.so", lib_path)
+                if debug_mode:
+                    shutil.copyfile(build_dir/"code_exe", lib_path.with_suffix('').with_suffix('.exe'))
+            return
+
+        #with tempfile.TemporaryDirectory() as tmpdirname:
+        #    code_file = os.path.join(tmpdirname, "code.cpp")
+        #    with open(code_file, "w") as f:
+        #        f.write(code)
+        #    o_file = os.path.join(tmpdirname, "code.o")
+        #    cmd = f"g++ {cxx_flag} -c {code_file}  -o {o_file}"
+        #    out_str = subprocess.check_output(cmd, shell=True).decode("utf-8")
+        #    cmd = f"g++ -shared  {cxx_flag}  {o_file} -o {lib_path}  "
+        #    out_str = subprocess.check_output(cmd, shell=True).decode("utf-8")
+#
+        #    if debug_mode:
+        #        cmd = f"{CXX} -g {code_file} -I{INC_FLAG} -o {lib_path}.exe"
+        #        out_str = subprocess.check_output(cmd, shell=True).decode("utf-8")
+        #    assert lib_path.exists(), "compile failed"
 
     def compile(self, models_with_name: dict):
         debug_mode = self.debug_mode

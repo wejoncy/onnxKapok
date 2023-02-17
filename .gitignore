@@ -1,4 +1,5 @@
 # Compiled Dynamic libraries
+build
 *.so
 
 *.pyc

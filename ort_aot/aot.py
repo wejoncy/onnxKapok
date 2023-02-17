@@ -22,13 +22,14 @@ from logger import logger
 
 
 # target = "x86_64"
-# target = "aarch64"
+# target = "arm64-v8a"
 def compile_model(
     model_path: Path, output_path: Path, lib_path: Path, target: str = "x86_64", ort_optimize_first: bool = False
 ):
     output_path.unlink(missing_ok=True)
     lib_path.unlink(missing_ok=True)
     capturer = graph_capture.CaptureOnnxSubGraph(ort_optimize_first)
+    if target != "x86_64":lib_path = Path(lib_path.name)
     model_with_name = capturer.run(model_path, lib_path)
     cpp_backend = CppBackend(lib_path, target)
     cpp_backend.compile(model_with_name)
@@ -50,6 +51,7 @@ def debug_model(
 ):
     capturer = graph_capture.CaptureOnnxSubGraph()
     model_with_name = capturer.run(model_path, lib_path)
+    if target != "x86_64":lib_path = Path(lib_path.name)
     cpp_backend = CppBackend(lib_path, target, debug_mode=True)
     cpp_backend.compile(model_with_name)
 

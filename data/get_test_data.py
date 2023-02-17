@@ -109,6 +109,13 @@ def get_tokenizer_and_huggingface_model(model_name):
             config, "sequence-classification"
         )
         text = ("Christening a shock-and-awe short-selling outfit requires more creativity. Hindenburg Research, named after the doomed hydrogen-filled German airship, was founded by Jim Henson in 2017 to hunt for impending corporate disasters, and then hold a torch to them",)
+    elif model_name == "squeezebert/squeezebert-uncased":
+        model = transformers.SqueezeBertForSequenceClassification.from_pretrained(
+            model_name)
+        onnx_config = transformers.models.ernie.ErnieOnnxConfig(
+            config, "sequence-classification"
+        )
+        text = ("Christening a shock-and-awe short-selling outfit requires more creativity. Hindenburg Research, named after the doomed hydrogen-filled German airship, was founded by Jim Henson in 2017 to hunt for impending corporate disasters, and then hold a torch to them",)
     else:
         raise ValueError(f"{model_name} is not supported")
     return tokenizer, model, onnx_config, text
