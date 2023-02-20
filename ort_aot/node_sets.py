@@ -12,14 +12,15 @@ class ElementWiseNodeSet:
             "Div",
             "Mul",
             "Exp",
-            #"Tanh",
+            "Tanh",
             #"Cast",
             "Erf",
-            #"Gelu",
+            "Gelu",
             "FastGelu",
             "Relu",
             #"Equal",
             #"Not",
+            #"Where",
         }
     )
 
@@ -58,7 +59,21 @@ class ShapeNodeSet:
     def __contains__(self, optype):
         return optype in self.type_collection
 
+class DecomposeNodeSetInternal:
+    type_collection = set(
+        {
+            "ReduceMean",
+            "Softmax",
+            "LayerNormalization",
+        }
+    )
 
+    def __contains__(self, node_or_optype):
+        if isinstance(node_or_optype, onnx.NodeProto):
+            optype = node_or_optype.op_type
+        else:
+            optype = node_or_optype
+        return optype in self.type_collection
 class ReduceNodeSetInternal:
     type_collection = set(
         {
@@ -82,7 +97,7 @@ class ReduceNodeSetInternal:
             "L1",
             "L2",
             "Softmax",
-            #"LayerNormalization",
+            "LayerNormalization",
         }
     )
 

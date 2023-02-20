@@ -119,9 +119,10 @@ def analyze_io(
             pass
         if v in cached_buffer:
             type_and_shape = c_graph.egraph.tensor_type_shape_info[v.replace('out_','')]
+            sp = type_and_shape[1][-1] if type_and_shape[1] else 1
             assert (
-                sympy_utils.sympy_symbol(type_and_shape[1][-1])
-                            == cached_buffer[v].shape[-1]
+                sympy_utils.sympy_symbol(sp)
+                            == (cached_buffer[v].shape[-1] if cached_buffer[v].shape else 1)
             ), "???buffer not matched"
             buffer = cached_buffer[v]
         elif  v in c_graph.egraph.graph_input_names:
@@ -186,7 +187,7 @@ class GraphLowering(common.NodeVisitor):
             for block in blocks:
                 block.lower(self, context)
             schedule = scheduling.Schedule()
-            blocks = schedule.fusion_op(blocks, set(i.name for i in global_buffer.var_buffer_out))
+            blocks = schedule.fusion_op(blocks, set(i.name for i in global_buffer.var_buffer_in), set(i.name for i in global_buffer.var_buffer_out))
             blocks = schedule.tile_inner_loop(blocks, context.vec_lanes)
             if allow_vectorize:
                 blocks = schedule.vectoring_inner_loop(blocks, context.vec_lanes)

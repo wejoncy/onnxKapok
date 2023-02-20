@@ -77,7 +77,7 @@ class CaptureOnnxSubGraph(object):
             self.node_order[node.name] = len(self.node_order) + 1
         return self.graph
 
-    def substitute_nodes_with_subgraph(
+    def substitute_subgraph_with_fusednode(
         self, sub_graph: common.IndexSubGraph, lib_path: Path
     ) -> str:
         for node in sub_graph.sub_graph_nodes:
@@ -169,8 +169,8 @@ class CaptureOnnxSubGraph(object):
 
         input_name = get_input_name(sub_graph_nodes)
         assert set(input_name) == set(
-            sub_graph.input_name_ref_c.keys()) and all(
-                [x in input_name for x in sub_graph.input_name_exclude_constant.keys()]), "input name not match"
+            sub_graph.input_name_ref_c.keys()), "input name not match"
+        assert all([x in input_name for x in sub_graph.input_name_exclude_constant.keys()]), "input name not match"
         # print(
         #    "graph inputs:",
         #    len(input_name),
@@ -195,7 +195,7 @@ class CaptureOnnxSubGraph(object):
         for out, _ in sub_graph.output_name_ref_c.items():
             dtype = type_shape_info[out][0] if out in type_shape_info else 0 # unkown dtype
             shape = type_shape_info[out][1] if out in type_shape_info else []
-            if shape == [] or (shape == [1] or dtype == 7):
+            if (shape == [] or shape == [1]) and dtype == 7:
                 return None
             tensor_type = onnx.helper.make_tensor_type_proto(
                 elem_type=dtype, shape=type_shape_info[out][1]
@@ -216,7 +216,7 @@ class CaptureOnnxSubGraph(object):
         onnx_sub_graph.node.sort(key=lambda x: self.node_order[x.name])
         opset_imports = [
             onnx.helper.make_operatorsetid(domain, opset)
-            for domain, opset in {"": 16, "com.microsoft": 1}.items()
+            for domain, opset in {"": 17, "com.microsoft": 1}.items()
         ]
         subgraph_model = onnx.helper.make_model(
             onnx_sub_graph, opset_imports=opset_imports
@@ -227,7 +227,7 @@ class CaptureOnnxSubGraph(object):
         onnx.checker.check_model(subgraph_model)
         # onnx.save(subgraph_model, "subgraph.onnx")
 
-        # self.substitute_nodes_with_subgraph(sub_graph)
+        # self.substitute_subgraph_with_fusednode(sub_graph)
         # onnx.checker.check_model(self.model_proto)
         # save_path = './fused.onnx'
         # onnx.save(self.model_proto, save_path)
@@ -292,7 +292,8 @@ class CaptureOnnxSubGraph(object):
             _, node = q_nodes.get()
             if node.name in assigned_node_by_name:
                 return None, None
-
+            if node.name == '/transformer/Cast_1':
+                print('debug')
             # if not sub_graph.input_name_exclude_constant:
             #    for name in (list(node.input) +self.graph_input_names):
             #        if self.is_constant_input(name) is False:
@@ -308,13 +309,18 @@ class CaptureOnnxSubGraph(object):
                 return
 
             assigned_node_by_name.add(node.name)
-            sub_graph.sub_graph_nodes.append(node)
 
             for i in node.input:
                 not_available_tensor.add(i)
 
             for o in node.output:
                 not_available_tensor.add(o)
+
+            if node.op_type == 'Cast' and (
+                self.in_graph.tensor_type_shape_info[node.input[0]][0] == 7):
+                return None, None
+                
+            sub_graph.sub_graph_nodes.append(node)
 
             new_input_name = []
             connected_node_i = []
@@ -331,9 +337,10 @@ class CaptureOnnxSubGraph(object):
                     ):
                         connected_node_i += pre_nodes
                         q_nodes.put((self.node_order[pre_nodes[0].name], pre_nodes[0]))
-                if name not in sub_graph.input_name_ref_c:
-                    sub_graph.input_name_ref_c[name] = 0
-                sub_graph.input_name_ref_c[name] += 1
+                if name not in sub_graph.output_name_ref_c:
+                    if name not in sub_graph.input_name_ref_c:
+                        sub_graph.input_name_ref_c[name] = 0
+                    sub_graph.input_name_ref_c[name] += 1
 
                 if (
                     name in self.in_graph.produced_by
@@ -351,7 +358,8 @@ class CaptureOnnxSubGraph(object):
 
 
             for v in new_input_name:
-                sub_graph.input_name_exclude_constant[v] = 0
+                if v not in sub_graph.output_name_ref_c:
+                    sub_graph.input_name_exclude_constant[v] = 0
 
             if len(sub_graph.input_name_exclude_constant) > 14:
                 return
@@ -421,16 +429,16 @@ class CaptureOnnxSubGraph(object):
         for idx, (sub_graph, sub_model) in enumerate(
             zip(sub_graph_list, sub_model_list)
         ):
-            #if idx != 1:continue
+            #if idx != 4:continue
             break_f = False
             # bypass Gelu
             for node in sub_graph.sub_graph_nodes:
-                if node.op_type == "Erf":
+                if node.op_type == "Erf11":
                     break_f = True
                     break
             if break_f:
                 continue
-            func_name = self.substitute_nodes_with_subgraph(sub_graph, lib_path)
+            func_name = self.substitute_subgraph_with_fusednode(sub_graph, lib_path)
             model_with_name[func_name] = sub_model
 
         self.graph.node.sort(key=lambda x: self.node_order[x.name])

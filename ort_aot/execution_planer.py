@@ -82,12 +82,12 @@ class ConnectionGraph(object):
         return self.node_2_gnode[name]
 
     def try_decompose(self, node) -> (list):
-        if node in node_sets.ReduceNodeSetInternal():
+        if node in node_sets.DecomposeNodeSetInternal():
             return self.decompose_dispatcher(node)
 
         return []
 
-    def decompose(self, graph):
+    def decompose(self, graph, recursive_depth=1):
         replace_nodes = {}
         for node in graph.node:
             r_nodes = self.try_decompose(node)
@@ -96,6 +96,8 @@ class ConnectionGraph(object):
         for node, r_nodes in replace_nodes.values():
             graph.node.remove(node)
             graph.node.extend(r_nodes)
+        if recursive_depth > 0:
+            self.decompose(graph, recursive_depth - 1)
 
     def try_recompose(self, node:onnx.NodeProto, egraph:common.OnnxInGraph) -> (list):
         assert node.op_type == "Erf"

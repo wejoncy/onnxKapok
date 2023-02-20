@@ -235,7 +235,7 @@ extern "C"{
             vec_var_map = var_context.vectorized_var_set
             ori_named_vars_i = [var_map[i.name] for i in node.input]
             ori_named_vars_o = [var_map[i.name] for i in node.output]
-            suffix = ["", ""]
+            suffix = ["" for i in ori_named_vars_i]
 
             named_vars_i = ori_named_vars_i.copy()
             named_vars_o = ori_named_vars_o.copy()
@@ -289,10 +289,13 @@ extern "C"{
             named_vars_i[0] = f"{named_vars_i[0]}{suffix[0]}"
 
             # add suffix 'f' for float constant
-            if len(named_vars_i) == 2:
-                raw_named_vars_1 = named_vars_i[1]
-                named_vars_i[1] = f"{named_vars_i[1]}{suffix[1]}"
-                # ",".join(np.char.mod("%.6ef", var_map[named_vars_i[i]]))
+            raw_named_vars_1 = named_vars_i[-1]
+            named_vars_i[-1] = f"{named_vars_i[-1]}{suffix[-1]}"
+
+            if len(named_vars_i)==3 and suffix[-1] == "f" and node.vectorization:
+                dtype = common.NP_TYPE_C_TYPE[node.input[-1].dtype.type]
+                named_vars_i[-1] = f"mipp::Reg<{dtype}>({named_vars_i[-1]})"
+
             assert len(named_vars_i) in [1, 2, 3]
             assert len(named_vars_o) == 1
 
@@ -321,8 +324,13 @@ extern "C"{
                     src += f"{named_var_o} = pow({named_vars_i[0]},{named_vars_i[1]});\n"
             elif node.op_type == "Sqrt":
                 src += f"{named_var_o} = {vectorized_prefix}sqrt({named_vars_i[0]});\n"
-            # elif node.op_type == "Cast":
-            #    src += f"{named_var_o} = sqrt({named_vars_i[0]});\n"
+            elif node.op_type == "Rsqrt":
+                if node.vectorization:
+                    src += f"{named_var_o} = {vectorized_prefix}rsqrt({named_vars_i[0]});\n"
+                else:
+                    src += f"{named_var_o} = 1.f/{vectorized_prefix}sqrt({named_vars_i[0]});\n"
+            elif node.op_type == "Cast":
+               src += f"{named_var_o} = ({named_vars_i[0]});\n"
             elif node.op_type == "Erf":
                 # 2/sqrt(M_PI) = 1.1283791671f
                 src += f"{named_var_o} = tanh_mlas({named_vars_i[0]}*({named_vars_i[0]}*{named_vars_i[0]}*2*0.044715f+1.f)*1.1283791671f);\n"
@@ -333,6 +341,11 @@ extern "C"{
                 src += f"{named_var_o} = {vectorized_prefix}exp({named_vars_i[0]});\n"
             elif node.op_type == "Tanh":
                 src += f"{named_var_o} = tanh_mlas({named_vars_i[0]});\n"
+            elif node.op_type == "Where":
+                if node.vectorization:
+                    src += f"{named_var_o} = {vectorized_prefix}blend({named_vars_i[1]},{named_vars_i[2]},{named_vars_i[0]});\n"
+                else:
+                    src += f"{named_var_o} = {named_vars_i[0]} ? {named_vars_i[1]} : {named_vars_i[2]};\n"
             else:
                 raise Exception(f"not supported {node.op_type}")
             return src
@@ -418,10 +431,14 @@ extern "C"{
                 pass
             else:
                 load_addr = f'&e_{annotated_var}'
+            if node.input.dtype.type == np.bool_:
+                vec_type = "mipp::Msk<mipp::N<float>()>"
+            else:
+                vec_type = f"mipp::Reg<{dtype}>"
             return (
                 code
                 + space_indent
-                + f"mipp::Reg<{dtype}> vec_{named_var} = {load_addr};\n"
+                + f"{vec_type} vec_{named_var} = {load_addr};\n"
             )
         else:
             return code + space_indent + f"auto {named_var} = {load_addr};\n"

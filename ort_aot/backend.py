@@ -156,7 +156,8 @@ class CppBackend(object):
         self.lib_path = lib_path
         self.target = target
         self.debug_mode = debug_mode
-        self.context: common.HardwareContext = common.HardwareContext(target, 16)
+        self.context: common.HardwareContext = common.HardwareContext(
+            target, 16 if target=="x86_64" else 4)
 
     def lower(
         self,
@@ -213,7 +214,7 @@ class CppBackend(object):
         cxx_flag = f"-std=c++17 -O3 {try_flag}  {try_ld} {vec_flag} -fPIC -I{INC_FLAG}"
 
 
-        cmake_args = ['-DWITH_DEBUG_EXE='+ ("ON" if debug_mode else "OFF")]
+        cmake_args = ['-DWITH_DEBUG_EXE='+ ("ON" if debug_mode else "OFF")]#, '-G', 'Ninja']
         cmake_replace_rules = {'{EXTRA_CXX_FLAGS}': '-march=native' if target == "x86_64" else '',
                                '{TPT_DIR}': str(Path(".").resolve(strict=True))}
 

@@ -41,7 +41,8 @@ class Schedule(object):
         return loop1
 
     def update_IO_after_fusion_op(
-        self, bb1: Igniter_IR.ExecutionBlock, bb2: Igniter_IR.ExecutionBlock, global_output: Set[str]
+        self, bb1: Igniter_IR.ExecutionBlock, bb2: Igniter_IR.ExecutionBlock, 
+        global_input: Set[str], global_output: Set[str]
     ):
         bb1.var_map.update(bb2.var_map)
         bb2.var_map.clear()
@@ -60,9 +61,11 @@ class Schedule(object):
                 new_output.remove(var)
             elif var in bb1.input:
                 pass
+            elif var in global_input:
+                # a var is not in bb1.input and not bb1.output
+                new_input.add(var)
             else:
-                bb2.forward_var_set[-1][var.name] = var
-                # new_input.add(var)
+                bb2.forward_var_set[-1][var.name] = var 
 
         for k, v in tmp_var_but_across_loop.items():
             if k not in bb1.forward_var_set[-1]:
@@ -72,7 +75,7 @@ class Schedule(object):
         bb1.output = list(new_output)
         bb1.input = list(new_input)
 
-    def fusion_op(self, blocks: List[Igniter_IR.ExecutionBlock], global_output: Set[str]):
+    def fusion_op(self, blocks: List[Igniter_IR.ExecutionBlock], global_input: Set[str], global_output: Set[str]):
         if len(blocks) < 2:
             return blocks
         de_blocks = deque(blocks)
@@ -93,7 +96,7 @@ class Schedule(object):
             if self.can_fusion_op(bb1.body, bb2.body):
                 bb1.body = self.do_fusion_recursive(bb1.body, bb2.body)
                 bb1.fused_groups.append(bb2.group)
-                self.update_IO_after_fusion_op(bb1, bb2, global_output)
+                self.update_IO_after_fusion_op(bb1, bb2, global_input, global_output)
 
                 de_blocks.appendleft(bb1)
             else:
