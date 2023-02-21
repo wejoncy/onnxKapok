@@ -13,7 +13,7 @@ class ElementWiseNodeSet:
             "Mul",
             "Exp",
             "Tanh",
-            #"Cast",
+            "Cast",
             "Erf",
             "Gelu",
             "FastGelu",
@@ -102,9 +102,9 @@ class ReduceNodeSetInternal:
     )
 
     def __contains__(self, node_or_optype):
-        if isinstance(node_or_optype, onnx.NodeProto):
+        try:
             optype = node_or_optype.op_type
-        else:
+        except:
             optype = node_or_optype
         return optype in self.type_collection
 

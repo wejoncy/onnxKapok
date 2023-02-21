@@ -4,19 +4,19 @@ from onnxsim import simplify
 
 import tempfile
 import numpy as np
-from collections import deque, OrderedDict
+from collections import deque, OrderedDict,defaultdict
 from queue import PriorityQueue
 from typing import Union, List, Tuple, Dict
 from pathlib import Path
 import re
-
+import struct
 import transformers
 
 import common
 import backend
 import node_sets
 from logger import logger
-import struct
+
 
 def remove_unused_nodes(model: onnx.ModelProto) -> onnx.ModelProto:
     out_to_node = {}
@@ -55,7 +55,7 @@ class CaptureOnnxSubGraph(object):
             session_options.graph_optimization_level = (
                 ort.GraphOptimizationLevel.ORT_ENABLE_EXTENDED
             )
-            with tempfile.NamedTemporaryFile() as temp:
+            with tempfile.NamedTemporaryFile(suffix='.onnx') as temp:
                 session_options.optimized_model_filepath = temp.name
                 f_model = ort.InferenceSession(
                     str(model_path),
@@ -102,12 +102,24 @@ class CaptureOnnxSubGraph(object):
             if isinstance(x, str):
                 return re.sub(r'[^a-zA-Z0-9_]+', '_', x)
             return str(x)
-        in_symbol_name = OrderedDict()
+
+
+        # we don't support when not all dynamic shapes existed in one input
+        max_sym_len = 0
+        max_sym_len_idx = 0
         for i0_idx,inp in enumerate(sub_graph.input_name_exclude_constant):
-            for i1_idx,in_sp in enumerate(self.in_graph.tensor_type_shape_info[inp][1]):
-                if isinstance(in_sp, str) and legal_shape(in_sp) not in in_symbol_name:
-                    in_symbol_name[legal_shape(in_sp)] = [len(
-                        in_symbol_name), (i0_idx, i1_idx)]
+            if len([i for i in self.in_graph.tensor_type_shape_info[inp][1] if isinstance(i, str)]) > max_sym_len:
+                max_sym_len= len([i for i in self.in_graph.tensor_type_shape_info[inp][1] if isinstance(i, str)])
+                max_sym_len_idx = i0_idx
+
+        in_symbol_name = OrderedDict()
+        max_sym_inp = sub_graph.input_name_exclude_constant[max_sym_len_idx]
+        for i1_idx, in_sp in enumerate(self.in_graph.tensor_type_shape_info[max_sym_inp][1]):
+                if isinstance(in_sp, str):
+                    if legal_shape(in_sp) not in in_symbol_name:
+                        in_symbol_name[legal_shape(in_sp)] = [len(
+                            in_symbol_name), (max_sym_len_idx, i1_idx)]
+
         dynamic_shape = []            
         for shape_symbol,pos in in_symbol_name.items():
             tb = struct.pack("<ii", *pos[1])
@@ -134,12 +146,12 @@ class CaptureOnnxSubGraph(object):
         
         node = onnx.helper.make_node(
             op_type="AOTanyOp",
-            inputs=list(sub_graph.input_name_exclude_constant.keys()),
+            inputs=list(sub_graph.input_name_exclude_constant),
             outputs=list(sub_graph.output_name_ref_c.keys()),
             name=func_name,
             domain="com.microsoft",
             func_name=func_name,
-            func_type=len(sub_graph.input_name_exclude_constant.keys()),
+            func_type=len(sub_graph.input_name_exclude_constant),
             lib_path=str(lib_path),
             output_shapes=output_shapes,
             match_pairs=packed_shape_match_pairs,
@@ -150,10 +162,10 @@ class CaptureOnnxSubGraph(object):
         self.graph.node.append(node)
         return func_name
 
-    def create_sub_graph_to_onnx(self, sub_graph: common.IndexSubGraph):
+    def create_model_wuth_sub_graph_(self, sub_graph: common.IndexSubGraph):
         sub_graph_nodes = sub_graph.sub_graph_nodes
 
-        if len(sub_graph_nodes) == 1:
+        if len(sub_graph_nodes) <= 1 or len(sub_graph.input_name_exclude_constant) == 0:
             return None
 
         def get_input_name(sub_graph_nodes):
@@ -170,15 +182,7 @@ class CaptureOnnxSubGraph(object):
         input_name = get_input_name(sub_graph_nodes)
         assert set(input_name) == set(
             sub_graph.input_name_ref_c.keys()), "input name not match"
-        assert all([x in input_name for x in sub_graph.input_name_exclude_constant.keys()]), "input name not match"
-        # print(
-        #    "graph inputs:",
-        #    len(input_name),
-        #    " var inputs",
-        #    len(sub_graph.input_name_exclude_constant),
-        #    "nodes:",
-        #    len(sub_graph_nodes),
-        # )
+        assert all([x in input_name for x in sub_graph.input_name_exclude_constant]), "input name not match"
 
         type_shape_info = self.in_graph.tensor_type_shape_info
         onnx_sub_graph = onnx.GraphProto()
@@ -292,13 +296,6 @@ class CaptureOnnxSubGraph(object):
             _, node = q_nodes.get()
             if node.name in assigned_node_by_name:
                 return None, None
-            if node.name == '/transformer/Cast_1':
-                print('debug')
-            # if not sub_graph.input_name_exclude_constant:
-            #    for name in (list(node.input) +self.graph_input_names):
-            #        if self.is_constant_input(name) is False:
-            #            sub_graph.input_name_exclude_constant.add(name)
-            #        sub_graph.input_name_ref_c[name] += 0
 
             if (
                 self.verify_input_is_not_in_cycle(
@@ -322,8 +319,6 @@ class CaptureOnnxSubGraph(object):
                 
             sub_graph.sub_graph_nodes.append(node)
 
-            new_input_name = []
-            connected_node_i = []
             for name in node.input:
                 if (
                     name in self.in_graph.produced_by
@@ -335,34 +330,11 @@ class CaptureOnnxSubGraph(object):
                         pre_nodes[0].op_type != "Constant"
                         and pre_nodes[0].op_type in e_node_set
                     ):
-                        connected_node_i += pre_nodes
                         q_nodes.put((self.node_order[pre_nodes[0].name], pre_nodes[0]))
-                if name not in sub_graph.output_name_ref_c:
-                    if name not in sub_graph.input_name_ref_c:
-                        sub_graph.input_name_ref_c[name] = 0
-                    sub_graph.input_name_ref_c[name] += 1
 
-                if (
-                    name in self.in_graph.produced_by
-                    and name not in sub_graph.input_name_exclude_constant
-                    and name not in sub_graph.output_name_ref_c
-                    and not self.is_constant_input(name)
-                ):
-                    pre_nodes = self.in_graph.produced_by[name]
-                    if pre_nodes[0].op_type != "Constant":
-                        new_input_name.append(name)
-                # we should support the case that the input is a graph input
-                elif 'out_' + name in self.in_graph.graph_input_names:
-                    new_input_name.append(name)
-
-
-
-            for v in new_input_name:
-                if v not in sub_graph.output_name_ref_c:
-                    sub_graph.input_name_exclude_constant[v] = 0
-
-            if len(sub_graph.input_name_exclude_constant) > 14:
-                return
+                if name not in sub_graph.input_name_ref_c:
+                    sub_graph.input_name_ref_c[name] = 0
+                sub_graph.input_name_ref_c[name] += 1
 
             connected_node_o = []
             for name in node.output:
@@ -377,22 +349,12 @@ class CaptureOnnxSubGraph(object):
                             q_nodes.put((self.node_order[con_node.name], con_node))
 
                 if name not in sub_graph.output_name_ref_c:
-                    sub_graph.output_name_ref_c[name] = 0
-                sub_graph.output_name_ref_c[name] += 1
+                    sub_graph.output_name_ref_c[name] = len(self.in_graph.consumed_by[name])
 
-                # if a input is produced by this subgraph, then we need to remove it from graph input
-                if name in sub_graph.input_name_exclude_constant:
-                    sub_graph.input_name_exclude_constant.pop(name)
-                if name in sub_graph.input_name_ref_c:
-                    sub_graph.input_name_ref_c.pop(name)
 
             while not q_nodes.empty():
                 find_sub_graph_by_dfs(q_nodes, sub_graph)
-            # for con_node in connected_node_i + connected_node_o:
-            #    if con_node.op_type in e_node_set:
-            #        find_sub_graph_by_dfs(con_node, sub_graph)
-            #    else:
-            #        assigned_node_by_name.add(node.name)
+
 
         node_nums_before_fusion = len(self.graph.node)
         sub_graph_list = []
@@ -412,9 +374,9 @@ class CaptureOnnxSubGraph(object):
                 available_tensor.update(not_available_tensor)
                 not_available_tensor = set()
                 sub_graph.sub_graph_nodes.sort(key=lambda x: self.node_order[x.name])
-                sub_graph.analyze_input_output(self.in_graph.consumed_by)
+                sub_graph.analyze_input_output(self.in_graph.tensor_type_shape_info, self.is_constant_input)
 
-                sub_model = self.create_sub_graph_to_onnx(sub_graph)
+                sub_model = self.create_model_wuth_sub_graph_(sub_graph)
                 if sub_model:
                     sub_graph_list.append(sub_graph)
                     sub_model_list.append(sub_model)
@@ -429,15 +391,7 @@ class CaptureOnnxSubGraph(object):
         for idx, (sub_graph, sub_model) in enumerate(
             zip(sub_graph_list, sub_model_list)
         ):
-            #if idx != 4:continue
-            break_f = False
-            # bypass Gelu
-            for node in sub_graph.sub_graph_nodes:
-                if node.op_type == "Erf11":
-                    break_f = True
-                    break
-            if break_f:
-                continue
+            #if idx != 1:continue
             func_name = self.substitute_subgraph_with_fusednode(sub_graph, lib_path)
             model_with_name[func_name] = sub_model
 

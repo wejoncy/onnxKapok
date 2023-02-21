@@ -1,5 +1,10 @@
 // https://raw.githubusercontent.com/Tencent/ncnn/master/src/layer/x86/avx_mathfun.h
 
+#include <cstdint>
+#ifdef __SIMD__
+#include <mipp/mipp.h>
+#endif
+
 const struct {
   float LowerRange;
   float UpperRange;
@@ -30,20 +35,29 @@ const struct {
     4.89352518554385e-03f,
 };
 
+template <class T, class... Rest>
+constexpr bool is_any = (std::is_same_v<T, Rest> || ...);
+
 template <typename VEC_T> VEC_T tanh_mlas(VEC_T Value) {
   // This odd two-step process exists to ensure an input value of NaN carries
   // through without modification because "std::min" and "std::max" return
   // unreliable results when NaNs are involved, and it's clear from the test's
   // reference outputs that they want a NaN on output whenever the input is a
   // NaN.
-  if constexpr (std::is_same_v<VEC_T, float>) {
+  //if constexpr (std::is_same_v<VEC_T, float>) {
+  if constexpr (is_any<VEC_T, float, int32_t, uint32_t, double, int64_t,
+                       uint64_t>) {
     auto v_tmp = (Value < MlasTanhConstants.LowerRange)? MlasTanhConstants.LowerRange: Value;
     Value = (v_tmp > MlasTanhConstants.UpperRange) ? MlasTanhConstants.UpperRange: v_tmp;
   } else {
+#ifdef __SIMD__
     auto lower_range = VEC_T(MlasTanhConstants.LowerRange);
     auto upper_range = VEC_T(MlasTanhConstants.UpperRange);
     auto v_tmp = mipp::min(Value, upper_range);
     Value = mipp::max(v_tmp, lower_range);
+#else
+    abort();
+  #endif
   }
 
   auto ValueSquared = Value * Value;

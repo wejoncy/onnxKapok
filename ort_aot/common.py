@@ -6,7 +6,7 @@ import enum
 import numpy as np
 import symbolic_shape_infer
 from abc import ABCMeta, abstractmethod
-import logger
+from logger import logger
 
 _ENABLE_PARALLEL_COMPILE = False
 
@@ -304,18 +304,37 @@ class GraphIOBuffer(object):
 class IndexSubGraph(object):
     def __init__(self):
         self.sub_graph_nodes = []
-        self.input_name_exclude_constant = OrderedDict()
+        self.input_name_exclude_constant = []
         self.input_name_ref_c = OrderedDict()
         self.output_name_ref_c = OrderedDict()
         self.reduce_op = []
 
-    def analyze_input_output(self, consumed_by_name2node):
+    def analyze_input_output(self, tensor_type_shape_info, is_constant_func):
         for ink in list(self.input_name_ref_c.keys()):
             v = self.input_name_ref_c[ink]
             if ink in self.output_name_ref_c:
                 self.input_name_ref_c.pop(ink)
-                if len(consumed_by_name2node[ink]) == v:
+                if self.output_name_ref_c[ink] <= v:
                     self.output_name_ref_c.pop(ink)
+
+        mut_input_name = []
+        for ink,count in self.input_name_ref_c.items():
+            if not is_constant_func(ink):
+                mut_input_name.append(ink)
+        
+        # re order inputs/output by dtype
+        non_float_idx = []
+        for idx, ink in enumerate(mut_input_name):
+            if tensor_type_shape_info[ink][0] != 1:
+                non_float_idx.append(idx)
+        if len(non_float_idx) > 1:
+            logger.info(f"subgraph has multiple non-float32 inputs, skip. {len(self.sub_graph_nodes)} nodes was skipped.")
+            return
+        if not non_float_idx or non_float_idx[0] == 1 or len(mut_input_name) == 1:
+            pass
+        else:
+            mut_input_name[1], mut_input_name[non_float_idx[0]] = mut_input_name[non_float_idx[0]], mut_input_name[1]
+        self.input_name_exclude_constant = mut_input_name
 
 
 class HardwareContext(object):

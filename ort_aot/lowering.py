@@ -183,7 +183,7 @@ class GraphLowering(common.NodeVisitor):
         def lower_to_functionNode(blocks: List[ir.ExecutionBlock],
                                 global_buffer: common.GraphIOBuffer,
                                 func_name: str,
-                                allow_vectorize: bool = True):
+                                allow_vectorize: bool):
             for block in blocks:
                 block.lower(self, context)
             schedule = scheduling.Schedule()
@@ -205,7 +205,8 @@ class GraphLowering(common.NodeVisitor):
             plan = execution_planer.ExecutionPrepare(model)
             plan.prepare()
             node_group = plan.create_execution_plan(analyze_io)
-            function: FunctionNode = lower_to_functionNode(node_group, plan.external_buffer, func_name)
+            function: FunctionNode = lower_to_functionNode(
+                node_group, plan.external_buffer, func_name, allow_vectorize)
             node.body.append(function)
         node.has_vectorization = allow_vectorize
 

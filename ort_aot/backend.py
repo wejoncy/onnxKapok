@@ -26,106 +26,79 @@ class MainFunctionForDebug(Igniter_IR.IRNode):
         self.out_arg_type_shape = function.output
 
     def code_gen(self, visitor: common.NodeVisitor, var_context: common.CodeGenContext, indent: int = 0):
-        return 'int main(){return 0;}\n'
-        in_shapes = [i[1] for i in self.in_arg_type_shape]
-        out_shapes = [i[1] for i in self.out_arg_type_shape]
-        
-        out_dynamic_shape_axis = [
-            [idx for idx, i in enumerate(out_shape) if isinstance(i, str)]
-            for out_shape in out_shapes
-        ]
-        out_dynamic_shape_symbol = [
-            sp for out_shape in out_shapes for sp in out_shape if isinstance(sp, str)]
+        input_dtypes = [i.dtype for i in self.in_arg_type_shape]
+        input_ctype = [common.NP_TYPE_C_TYPE[i.type] for i in input_dtypes]
+        input_shapes = [i.shape.copy() for i in self.in_arg_type_shape]
+        output_shapes = [i.shape.copy() for i in self.out_arg_type_shape]
         
         in_dynamic_shape_axis = [
-            [idx for idx, i in enumerate(in_shape) if isinstance(i, str)]
-            for in_shape in in_shapes if in_shape
+            [idx for idx, i in enumerate(in_shape) if not i.is_number]
+            for in_shape in input_shapes
         ]
-        
-        assert (
-            in_dynamic_shape_axis[0] == out_dynamic_shape_axis[0]
-        ), "input and output dynamic shape axis should be same"
-        assert len(in_dynamic_shape_axis[0]) in [
-            1,
-            2,
-            3,
-        ], "only support two dynamic shape axis"
-
-        i_all_elem_s = []
-        o_all_elem_s = []
-        import numpy as np
-
-        for input_shape, in_dy_axis in zip(in_shapes, in_dynamic_shape_axis):
+        out_dynamic_shape_axis = [
+            [idx for idx, i in enumerate(out_shape) if not i.is_number]
+            for out_shape in output_shapes
+        ]
+        for input_shape, in_dy_axis in zip(input_shapes, in_dynamic_shape_axis):
             if input_shape == []:
-                input_shape=[1]
+                input_shape.append(1)
                 continue
             for dy in in_dy_axis:
                 input_shape[dy] = 24
             if 0 in in_dy_axis:
                 input_shape[0] = 1
-            i_all_elem_s.append(np.prod(input_shape))
 
-        for output_shape, out_dy_axis in zip(out_shapes, out_dynamic_shape_axis):
-            for dy in out_dy_axis[1:]:
+        for output_shape, out_dy_axis in zip(output_shapes, out_dynamic_shape_axis):
+            for dy in out_dy_axis:
                 output_shape[dy] = 24
             if 0 in out_dy_axis:
                 output_shape[0] = 1
-            o_all_elem_s.append(np.prod(output_shape))
+        input_shapes = [tuple(input_shape) for input_shape in input_shapes]
+        import numpy as np
+        numel_inputs = [np.prod(i) for i in input_shapes]
+        numel_outputs = [np.prod(i) for i in output_shapes]
+        
+        max_dim = max([len(iv) for iv in in_dynamic_shape_axis])
+        max_elem = max([np.prod(iv) for iv in input_shapes])
+        idx = [ind for ind, iax in enumerate(
+            in_dynamic_shape_axis) if len(iax) == (max_dim) and np.prod(input_shapes[ind]) == max_elem][0]
 
-        idx = [
-            i
-            for i in range(len(in_dynamic_shape_axis))
-            if len(in_dynamic_shape_axis[i]) > 1
-        ][0]
         in_dy_axis = in_dynamic_shape_axis[idx]
-        input_shape = in_shapes[idx]
+        input_shape = input_shapes[idx]
+        
 
         code = f"""
 #include <cassert>
 int main(int argc, const char* argv[]) {{
-    const char* input_file1 = "a0.bin";
-
-    float* input1=0, *input2=0, *input3=0;
-    input1 = new float[{i_all_elem_s[0]}];
-    FILE *fp1=fopen("a0.bin","rb");
-    int n =fread(input1, sizeof(float), {i_all_elem_s[0]}, fp1);
-    assert(n=={i_all_elem_s[0]});
-    fclose(fp1);
+    int n =0;
 """
-        if len(i_all_elem_s) > 1:
-            code += f"""
-    FILE *fp2=fopen("a1.bin","rb");
-    input2 = new float[{i_all_elem_s[1]}];
-    n = fread(input2, sizeof(float), {i_all_elem_s[1]}, fp2);
-    assert(n=={i_all_elem_s[1]});
-    fclose(fp2);
-"""
-            if len(i_all_elem_s) > 2:
-                code += f"""
-    FILE *fp3=fopen("a2.bin","rb");
-    input3 = new float[{i_all_elem_s[2]}];
-    n = fread(input3, sizeof(float), {i_all_elem_s[2]}, fp3);
-    assert(n=={i_all_elem_s[2]});
-    fclose(fp3);
-"""
-            elif len(i_all_elem_s) > 3:
-                raise Exception("not support more than 3 inputs yet")
-        code += f"""
-    float* output1=0, *output2=0;
-    output1 = new float[{o_all_elem_s[0]}];
-"""
-        if len(o_all_elem_s) > 1:
-            code += f"""
-    output2 = new float[{o_all_elem_s[1]}];
-"""
-            if len(o_all_elem_s) > 2:
-                raise Exception("not support more than 2 outputs yet")
-
+        buf_read = []
+        r_vars = [f'input{i}' for i in range(len(input_shapes))]
+        for i in range(len(input_shapes)):
+            buf_read.append(
+                f"""
+    FILE *fp{i}=fopen("a{i}.bin","rb");
+    auto* input{i} = new {input_ctype[i]}[{numel_inputs[i]}];
+    n = fread(input{i}, sizeof({input_ctype[i]}), {numel_inputs[i]}, fp{i});
+    assert(n=={numel_inputs[i]});
+    fclose(fp{i});
+                """
+            )
+        buf_write = []
+        w_vars =[f'output{i}' for i in range(len(output_shapes))]
+        for i in range(len(output_shapes)):
+            buf_write.append(
+                f"""
+    auto* output{i} = new float[{numel_outputs[i]}];
+                """
+            )
+        code += "\n".join(buf_read)
+        code += "\n".join(buf_write)
         code += f"""    
-    const float* input_ptr[] = {{input1,input2,input3}};
-    float* output_ptr[] = {{output1,output2}};
-    
-    {self.func_name}(input_ptr, {len(i_all_elem_s)},0, {input_shape[0]*input_shape[1]},  {input_shape[in_dy_axis[0]]}, {input_shape[in_dy_axis[1]]},output_ptr);
+    const void* input_ptr[] = {{{', '.join(r_vars)}}};
+    void* output_ptr[] = {{{', '.join(w_vars)}}};
+    const int64_t shape_ptr[] = {{{input_shape[in_dy_axis[0]]},{input_shape[in_dy_axis[1]]}}};
+    {self.func_name}(input_ptr, 0, {input_shape[0]*input_shape[1]},  shape_ptr,output_ptr);
     return 0;
 }}  
         """
@@ -159,30 +132,6 @@ class CppBackend(object):
         self.context: common.HardwareContext = common.HardwareContext(
             target, 16 if target=="x86_64" else 4)
 
-    def lower(
-        self,
-        blocks: List[Igniter_IR.ExecutionBlock],
-        global_buffer: common.GraphIOBuffer,
-        func_name: str,
-        allow_vectorize: bool = True,
-    ) -> Igniter_IR.FunctionNode:
-        for block in blocks:
-            block.lower()
-        schedule = Schedule()
-        blocks = schedule.fusion_op(blocks, set(i.name for i in global_buffer.var_buffer_out))
-        blocks = schedule.tile_inner_loop(blocks, self.context.vec_lanes)
-        if allow_vectorize:
-            blocks = schedule.vectoring_inner_loop(blocks, self.context.vec_lanes)
-        blocks = schedule.parallelize_outer_loop(blocks)
-        func = Igniter_IR.FunctionNode(
-            global_buffer.var_buffer_in, global_buffer.var_buffer_out
-        )
-        func.body = blocks
-        func.const_var = global_buffer.const_buffer
-        func.name = func_name
-        func.hw_context = self.context
-        func.lower()
-        return func
 
     def get_simd_intrinsics(self):
         cpufeat = cpufeature.CPUFeature

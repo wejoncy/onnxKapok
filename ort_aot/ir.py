@@ -89,6 +89,7 @@ class Loop(IRNode):
     def __init__(self):
         super().__init__()
         self.var: sympy.Expr = None
+        self.reduction_var: OrderedDict = None
         self.start = sympy.Integer(0)
         self.end = sympy.Integer(0)
         self.step = sympy.Integer(1)
@@ -140,6 +141,7 @@ class ExecutionBlock(IRNode):
         self.load = OrderedDict()
         self.loop_stack = []
         self.has_reduce = False
+        self.reduction_var = OrderedDict()
         # TODO support multiple outputs
         self.dtype = list(group[0].output_with_shapes.values())[0][0]
         self.shape = self.extract_shape(group)
@@ -177,13 +179,14 @@ class ExecutionBlock(IRNode):
 
     def extract_shape(self, group: List[IRNode]):
         assert len(group[-1].output_with_shapes) == 1
-        if group[-1].current_node in node_sets.ReduceNodeSetInternal():
+        if group[-1] in node_sets.ReduceNodeSetInternal():
             shape = []
             for i in list(group[-1].input_with_shapes.values())[0][1]:
                 ri = re.sub(r'[^a-zA-Z0-9_]+', '_',
                             i) if isinstance(i, str) else i
                 shape.append(sympy_utils.sympy_symbol(ri))
             self.has_reduce = True
+            self.reduction_var[group[-1].current_node.output[0]] = group[-1].op_type
         else:
             shape = []
             for i in list(group[-1].output_with_shapes.values())[0][1]:
@@ -206,6 +209,7 @@ class ExecutionBlock(IRNode):
         loop.end = self.shape[-1]
         loop.body = self.group
         if self.has_reduce:
+            loop.reduction_var = self.reduction_var
             loop.attributes = LoopAttr.Reduce
         else:
             loop.attributes = LoopAttr.Vectorization

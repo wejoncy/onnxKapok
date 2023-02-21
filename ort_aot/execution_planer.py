@@ -81,23 +81,26 @@ class ConnectionGraph(object):
 
         return self.node_2_gnode[name]
 
-    def try_decompose(self, node) -> (list):
+    def try_decompose(self, node, shape_info_map) -> (list):
         if node in node_sets.DecomposeNodeSetInternal():
-            return self.decompose_dispatcher(node)
+            return self.decompose_dispatcher(node, shape_info_map=shape_info_map)
 
         return []
 
-    def decompose(self, graph, recursive_depth=1):
+    def decompose(self, e_graph:common.OnnxInGraph, recursive_depth=1):
         replace_nodes = {}
+        graph=e_graph.graph
+        modified = False
         for node in graph.node:
-            r_nodes = self.try_decompose(node)
+            r_nodes = self.try_decompose(node, e_graph.tensor_type_shape_info)
             if r_nodes:
                 replace_nodes[node.name] = (node, r_nodes)
+                modified=True
         for node, r_nodes in replace_nodes.values():
             graph.node.remove(node)
             graph.node.extend(r_nodes)
-        if recursive_depth > 0:
-            self.decompose(graph, recursive_depth - 1)
+        if recursive_depth > 0 and modified:
+            self.decompose(e_graph, recursive_depth - 1)
 
     def try_recompose(self, node:onnx.NodeProto, egraph:common.OnnxInGraph) -> (list):
         assert node.op_type == "Erf"
@@ -129,8 +132,7 @@ class ConnectionGraph(object):
         erf_bool = ['Erf' in node.op_type for node in graph.node]
         erf_index = erf_bool.index(True) if True in erf_bool else -1
         if erf_index>= 0:
-            assert sum(erf_bool) == 1, "not support multiple erf node"
-            egraph.gen_name2module_map(False)
+            assert sum(erf_bool) == 1, "not support multiple erf node"            
             node= graph.node[erf_index]
             r_nodes, new_node = self.try_recompose(node, egraph)
             if r_nodes:
@@ -142,7 +144,8 @@ class ConnectionGraph(object):
 
     def build_relationship(self):
         self.egraph = common.OnnxInGraph(self.model)
-        self.decompose(self.egraph.graph)
+        self.egraph.gen_name2module_map()
+        self.decompose(self.egraph)
         self.recompose(self.egraph)
         self.egraph.gen_name2module_map()
         egraph = self.egraph

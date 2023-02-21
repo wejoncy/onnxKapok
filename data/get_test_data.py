@@ -29,6 +29,7 @@ def get_canonized_name(model_name: str):
 # avoid loading model from huggingface multiple times, it's time consuming
 @functools.lru_cache
 def get_tokenizer_and_huggingface_model(model_name):
+    model_name = model_name.replace("_dg", "")
     tokenizer = transformers.AutoTokenizer.from_pretrained(model_name)
     config = transformers.AutoConfig.from_pretrained(model_name)
     text_one_query = ("Christening a shock-and-awe short-selling outfit requires more creativity. ",)

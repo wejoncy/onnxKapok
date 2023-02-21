@@ -9,8 +9,8 @@ from queue import PriorityQueue
 from typing import Union, List, Tuple, Dict
 from pathlib import Path
 import re
+import copy
 
-import transformers
 import sys
 
 sys.path.append(str(Path(__file__).parent.resolve()))
@@ -19,6 +19,7 @@ from backend import CppBackend
 import node_sets
 import graph_capture
 from logger import logger
+import utils
 
 
 # target = "x86_64"
@@ -29,8 +30,9 @@ def compile_model(
     output_path.unlink(missing_ok=True)
     lib_path.unlink(missing_ok=True)
     capturer = graph_capture.CaptureOnnxSubGraph(ort_optimize_first)
-    if target != "x86_64":lib_path = Path(lib_path.name)
-    model_with_name = capturer.run(model_path, lib_path)
+    graph_lib_path= lib_path
+    if target != "x86_64":graph_lib_path = Path(lib_path.name)
+    model_with_name = capturer.run(model_path, graph_lib_path)
     cpp_backend = CppBackend(lib_path, target)
     cpp_backend.compile(model_with_name)
 
@@ -47,22 +49,22 @@ def compile_model(
 
 
 def debug_model(
-    model_path: Path, output_path: Path, lib_path: Path, target: str = "x86_64"
+    model_path: Path, output_path: Path, lib_path: Path, target: str = "x86_64", ort_optimize_first: bool = False
 ):
-    capturer = graph_capture.CaptureOnnxSubGraph()
+    capturer = graph_capture.CaptureOnnxSubGraph(ort_optimize_first)
     model_with_name = capturer.run(model_path, lib_path)
-    if target != "x86_64":lib_path = Path(lib_path.name)
     cpp_backend = CppBackend(lib_path, target, debug_mode=True)
+    model_with_name_copy = copy.deepcopy(model_with_name)
     cpp_backend.compile(model_with_name)
 
-    test_lib(model_with_name, lib_path)
+    test_lib(model_with_name_copy, lib_path)
 
-    for v in model_with_name.values():
-        capturer.model_proto.graph.output.extend(v.graph.output)
+    #for v in model_with_name.values():
+    #    capturer.model_proto.graph.output.extend(v.graph.output)
     capturer.model_proto.graph.output.extend(
         [
             onnx.ValueInfoProto(
-                name="/mobilebert/encoder/layer.23/ffn.1/output/Add_output_0"
+                name="/transformer/h.0/attn/Cast_1_output_0"
             )
         ]
     )
@@ -71,7 +73,7 @@ def debug_model(
     opset.version = 1
     opset.domain = "com.microsoft"
     onnx.save(capturer.model_proto, output_path)
-
+    return capturer.fused_node_nums
 
 class CostTime(object):
     def __init__(self, tcs: list, repeat: int = 1):
@@ -93,14 +95,13 @@ def test_lib(onnx_model_map: dict, lib_path: Path):
         logger.info(" multi subgraphs detected, will test the last one")
 
     func_name, onnx_model = list(onnx_model_map.items())[-1]
-    input_shapes = [
-        [i.dim_param or i.dim_value for i in inp.type.tensor_type.shape.dim]
-        for inp in onnx_model.graph.input
-    ]
-    output_shapes = [
-        [i.dim_param or i.dim_value for i in out.type.tensor_type.shape.dim]
-        for out in onnx_model.graph.output
-    ]
+    input_dtypes = [utils.get_elem_type_from_type_proto(inp.type) for inp in onnx_model.graph.input]
+    output_dtypes = [utils.get_elem_type_from_type_proto(
+        out.type) for out in onnx_model.graph.output]
+
+    input_shapes = [utils.get_shape_from_value_info(inp) for inp in onnx_model.graph.input]
+    output_shapes = [utils.get_shape_from_value_info(out) for out in onnx_model.graph.output]
+
     output_shapes[0][0] = 'batch'
     input_shapes[1][0] = 'batch'
 
@@ -122,7 +123,7 @@ def test_lib(onnx_model_map: dict, lib_path: Path):
             input_shape[0] = 1
 
     for output_shape, out_dy_axis in zip(output_shapes, out_dynamic_shape_axis):
-        for dy in out_dy_axis[1:]:
+        for dy in out_dy_axis:
             output_shape[dy] = 24
         if 0 in out_dy_axis:
             output_shape[0] = 1
@@ -136,17 +137,21 @@ def test_lib(onnx_model_map: dict, lib_path: Path):
     # func_handle.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
     func_handle.restype = ctypes.c_int
     a_in = []
-    for input_shape in input_shapes:
-        a_in.append(np.random.rand(*input_shape).astype(np.float32))
+    for idx, input_shape in enumerate( input_shapes):
+        if input_dtypes[idx] == 9:
+            a_in.append(np.random.rand(*input_shape).astype(np.float32)>0.5)
+        else:
+            a_in.append(np.random.rand(*input_shape).astype(common.TENSOR_TYPE_TO_NP_TYPE[input_dtypes[idx]]))
 
     c_out = []
     for output_shape in output_shapes:
         c_out.append(np.zeros(shape=output_shape).astype(np.float32))
 
-    input_count = len(onnx_model.graph.input)
-    output_count = len(onnx_model.graph.output)
+    input_count = len(input_shapes)
+    output_count = len(output_shapes)
     in_arg_type = ctypes.c_void_p * input_count
     out_arg_type = ctypes.c_void_p * output_count
+    shape_arg_type = ctypes.c_int
 
     if input_count == 2:
         in_arg = in_arg_type(a_in[0].ctypes.data, a_in[1].ctypes.data)
@@ -154,6 +159,10 @@ def test_lib(onnx_model_map: dict, lib_path: Path):
         in_arg = in_arg_type(
             a_in[0].ctypes.data, a_in[1].ctypes.data, a_in[2].ctypes.data
         )
+    elif input_count == 4:
+        in_arg = in_arg_type(
+            a_in[0].ctypes.data, a_in[1].ctypes.data, a_in[2].ctypes.data, a_in[3].ctypes.data
+        ) 
     else:
         in_arg = in_arg_type(a_in[0].ctypes.data)
 
@@ -161,24 +170,24 @@ def test_lib(onnx_model_map: dict, lib_path: Path):
         out_arg = out_arg_type(c_out[0].ctypes.data, c_out[1].ctypes.data)
     else:
         out_arg = out_arg_type(c_out[0].ctypes.data)
-
-    idx = [
-        i
-        for i in range(len(in_dynamic_shape_axis))
-        if len(in_dynamic_shape_axis[i]) > 1
-    ][0]
+    max_dim = max([len(iv) for iv in in_dynamic_shape_axis])
+    max_elem = max([np.prod(iv) for iv in input_shapes])
+    idx = [ind for ind, iax in enumerate(
+        in_dynamic_shape_axis) if len(iax) == (max_dim) and np.prod(input_shapes[ind]) == max_elem][0]
+    
     in_dy_axis = in_dynamic_shape_axis[idx]
     input_shape = input_shapes[idx]
+    shape_arg_np = np.array([input_shape[in_dy_axis[0]], input_shape[in_dy_axis[1]]])
+    shape_arg = shape_arg_np.ctypes.data
+
     c_tc = [0]
     with CostTime(c_tc) as tc:
         for i in range(10000):
             ret = func_handle(
                 in_arg,
-                input_count,
                 0,
                 input_shape[0] * input_shape[1],
-                input_shape[in_dy_axis[0]],
-                input_shape[in_dy_axis[1]],
+                shape_arg,
                 out_arg,
             )
 
@@ -196,7 +205,7 @@ def test_lib(onnx_model_map: dict, lib_path: Path):
             out = session.run([i.name for i in session.get_outputs()], input_feed)
 
     all_passed = all(
-        [np.allclose(out[i], c_out[i], rtol=1e-03, atol=1e-05) for i in range(len(out))]
+        [np.allclose(out[i], c_out[i], rtol=1e-03, atol=1e-05) for i in range(len(c_out))]
     )
     if all_passed:
         logger.info(f"Results are matched, time_cost: py_tc:{py_tc}, c_tc:{c_tc}")

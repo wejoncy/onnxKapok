@@ -25,10 +25,21 @@ class CPUCodeGen(common.NodeVisitor):
             buffer = buffer_l[0] if isinstance(buffer_l, list) else buffer_l
             str_var = str(fvar)
             if buffer.shape is not None and buffer.shape[-1] == 1:
+                if str_var not in node.reduction_var:
+                    init_val = 0.0
+                elif 'sum' in node.reduction_var[str_var].lower():
+                    init_val = 0.0
+                elif 'max' in node.reduction_var[str_var].lower():
+                    init_val = '-3.40082e38'
+                elif 'min' in node.reduction_var[str_var].lower():
+                    init_val = '3.40082e38'
+                else:
+                    assert False, "unsupported reduction type: %s" % node.reduction_var[str_var]
+
                 dec_header += need_indent + \
-                    f"float {var_map[str_var]} = 0.0f;\n"
+                    f"float {var_map[str_var]} = {init_val}f;\n"
                 if node.vectorization:
-                    dtype = common.NP_TYPE_C_TYPE[buffer.dtype.type]
+                    dtype = _get_type(buffer.dtype)
                     dec_header += (
                         need_indent
                         + f"mipp::Reg<{dtype}> vec_{var_map[str_var]} = 0.0f;\n"
@@ -128,9 +139,9 @@ class CPUCodeGen(common.NodeVisitor):
         in_param += [f"const int64_t* {common.SpecialVar().dynamic_shape_args}"]
         in_param = ",".join(in_param)
 
-        out_dtype = _get_type(node.output[0].dtype)
+        out_dtype = [_get_type(out.dtype) for out in node.output]
         # out_param = ",".join([f"float* e_{var_map[i.name]}" for i in node.output])
-        out_param = f"{out_dtype}** output_args"
+        out_param = f"void** output_args"
 
         func_signature = f"int {node.name}({in_param}, {out_param}) {{\n"
 
@@ -161,7 +172,7 @@ class CPUCodeGen(common.NodeVisitor):
         
         parse_output = [
             need_indent
-            + f"{out_dtype}* {restrict} e_{var_map[i.name]} = {common.SpecialVar().output_args}[{idx}];"
+            + f"{out_dtype[idx]}* {restrict} e_{var_map[i.name]} = ({out_dtype[idx]}*){common.SpecialVar().output_args}[{idx}];"
             for idx, i in enumerate(node.output)
         ]
         code += "\n".join(parse_output) + "\n\n"
@@ -179,12 +190,12 @@ class CPUCodeGen(common.NodeVisitor):
 
         for name, const in de_composed_const_var.items():
             np_array = common.parse_onnx_to_numpyarray(const)
-            dtype = common.NP_TYPE_C_TYPE[np_array.dtype.type]
+            dtype = _get_type(np_array.dtype)
             if np_array.size > 1:
                 np_array_u32 = np_array.view(np.uint32)
                 x_arrstr = np.char.mod("%#x", np_array_u32)
                 x_str = ",".join(x_arrstr)
-                dtype = common.NP_TYPE_C_TYPE[np_array.dtype.type]
+                dtype = _get_type(np_array.dtype)
                 const_declare = (
                     f"static constexpr uint32_t e_{var_map[name]}_u32p[] __attribute__((aligned({bytes_lanes}))) = {{{x_str}}};\n"
                     + need_indent
@@ -210,12 +221,18 @@ class CPUCodeGen(common.NodeVisitor):
     def ModuleNode(self, node :IRNode, var_context: common.CodeGenContext, indent: int):
         code = """
 #include <cmath>
+#include <algorithm>
+#include <cstdint>
+#include <cstddef>
 """
         if node.has_vectorization:
             code += """
 #include <mipp/mipp.h>
-#include <fast_math.h>
 using namespace mipp;
+#define __SIMD__ 1
+"""
+        code += """
+#include <fast_math.h>
 """
         code += """
 extern "C"{
@@ -273,7 +290,7 @@ extern "C"{
                 and is_input_1_vec
                 and not named_vars_i[0].startswith("vec_")
             ):
-                dtype = common.NP_TYPE_C_TYPE[node.input[0].dtype.type]
+                dtype = _get_type(node.input[0].dtype)
                 named_vars_i[0] = f"mipp::Reg<{dtype}>({named_vars_i[0]})"
                 
             if (
@@ -286,14 +303,14 @@ extern "C"{
                 suffix[0], suffix[1] = suffix[1], suffix[0]
                 named_vars_i[0], named_vars_i[1] = named_vars_i[1], named_vars_i[0]
 
-            named_vars_i[0] = f"{named_vars_i[0]}{suffix[0]}"
+            raw_named_vars_1 = named_vars_i[-1]
 
             # add suffix 'f' for float constant
-            raw_named_vars_1 = named_vars_i[-1]
-            named_vars_i[-1] = f"{named_vars_i[-1]}{suffix[-1]}"
+            for idx,var in enumerate(named_vars_i):
+                named_vars_i[idx] = f"{var}{suffix[idx]}"
 
             if len(named_vars_i)==3 and suffix[-1] == "f" and node.vectorization:
-                dtype = common.NP_TYPE_C_TYPE[node.input[-1].dtype.type]
+                dtype = _get_type(node.input[-1].dtype)
                 named_vars_i[-1] = f"mipp::Reg<{dtype}>({named_vars_i[-1]})"
 
             assert len(named_vars_i) in [1, 2, 3]
@@ -310,7 +327,7 @@ extern "C"{
             elif node.op_type == "Mul":
                 src += f"{named_var_o} = {named_vars_i[0]} * ({named_vars_i[1]});\n"
             elif node.op_type == "Relu":
-                src += f"{named_var_o} = {vectorized_prefix}max({named_vars_i[0]}, {'vec_zero' if node.vectorization else '0'});\n"
+                src += f"{named_var_o} = {vectorized_prefix}max<float>({named_vars_i[0]}, {'vec_zero' if node.vectorization else '0.f'});\n"
             elif node.op_type == "Fma":
                 # a*b+c
                 src += f"{named_var_o} = std::fma({named_vars_i[0]}, ({named_vars_i[1]},{named_vars_i[2]}));\n"
@@ -330,7 +347,12 @@ extern "C"{
                 else:
                     src += f"{named_var_o} = 1.f/{vectorized_prefix}sqrt({named_vars_i[0]});\n"
             elif node.op_type == "Cast":
-               src += f"{named_var_o} = ({named_vars_i[0]});\n"
+                from_dtype = node.input[0].dtype
+                to_dtype = node.output[0].dtype.type
+                if to_dtype == np.bool_:
+                    src += f"{named_var_o} = {named_vars_i[0]} != {_get_type(from_dtype)}(0);\n"
+                else:
+                    src += f"{named_var_o} = ({named_vars_i[0]});\n"
             elif node.op_type == "Erf":
                 # 2/sqrt(M_PI) = 1.1283791671f
                 src += f"{named_var_o} = tanh_mlas({named_vars_i[0]}*({named_vars_i[0]}*{named_vars_i[0]}*2*0.044715f+1.f)*1.1283791671f);\n"
@@ -353,7 +375,7 @@ extern "C"{
         space_indent = " " * indent
         src = space_indent + f"// {node.op_name} {node.op_type}\n"
 
-        if node.op_type == "Relu":
+        if node.op_type == "Relu" and node.vectorization:
             src += space_indent + "mipp::Reg<float> vec_zero = 0.0f;\n"
         src += space_indent + gen_cpp_code_for_op(var_context)
         return src
@@ -365,12 +387,13 @@ extern "C"{
         code = "\n"
         input_key = [i.name for i in node.input]
         output_key = [i.name for i in node.output]
+        out_dtype  = _get_type(node.output[0].dtype)
         try:
             input_1 = var_map[var_map[input_key[1]]]
         except:
             input_1 = np.array([np.NaN])
             pass
-        assert len(input_key) == 1 or (input_1 == -1).all()
+        assert len(input_key) == 1 or (input_1[0] != np.NaN).all()
         named_var_i = var_map[input_key[0]]
         named_var_o = var_map[output_key[0]]
         # this var is vectorized, add prefix 'vec_'
@@ -389,7 +412,7 @@ extern "C"{
         elif node.body.op_type == "ReduceMax":
             code += (
                 " " * indent
-                + f"{named_var_o} = {vec_pre}max({named_var_o},{named_var_i});\n"
+                + f"{named_var_o} = {vec_pre}max<{out_dtype}>({named_var_o},{named_var_i});\n"
             )
         else:
             raise Exception(f"not supported {node.body.op_type}")
@@ -404,7 +427,7 @@ extern "C"{
         assert var_name in var_map, f"name {var_name} not found in var_map"
         named_var = var_map[var_name]
         
-        dtype = common.NP_TYPE_C_TYPE[node.input.dtype.type]
+        dtype = _get_type(node.input.dtype)
         # if named_var is constant, no need to load
         if named_var in var_map:
             assert False, f"TODO: {named_var} is constant, no need to load"
@@ -431,9 +454,10 @@ extern "C"{
                 pass
             else:
                 load_addr = f'&e_{annotated_var}'
+
             if node.input.dtype.type == np.bool_:
                 vec_type = "mipp::Msk<mipp::N<float>()>"
-            else:
+            else:                
                 vec_type = f"mipp::Reg<{dtype}>"
             return (
                 code
@@ -456,12 +480,16 @@ extern "C"{
             code += " " * indent + f"// store {var_name} <<=== {named_var};\n"
         annotated_var = Indexer().code_gen(named_var, node.to_var)
         if node.vectorization:
-            return space_indent + f"{named_var}.store(&e_{annotated_var});\n"
+            # TODO special case for MIPP
+            if node.to_var.dtype.type == np.bool_:
+                return space_indent + f"mipp::toReg<int8_t>({named_var}).store((int8_t*)&e_{annotated_var});\n"
+            else:
+                return space_indent + f"{named_var}.store(&e_{annotated_var});\n"
         else:
             return space_indent + f"e_{annotated_var} = {named_var};\n"
 
 
-    def ExecutionBlock(self, node :IRNode, var_context: common.CodeGenContext, indent: int):
+    def ExecutionBlock(self, node :ExecutionBlock, var_context: common.CodeGenContext, indent: int):
         assert not var_context
         var_context = common.CodeGenContext(node.var_map)
         var_map = var_context.var_map
