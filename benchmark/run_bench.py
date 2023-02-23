@@ -236,8 +236,8 @@ def run_models_and_print_metrics():
     #run("lordtt13/emo-mobilebert")
     run("lordtt13/emo-mobilebert", True)
     #run("xlm-roberta-base")
-    run("xlm-roberta-base", True)
-    run("distilbert-base-uncased", True)
+    #run("xlm-roberta-base", True)
+    #run("distilbert-base-uncased", True)
     st= Statistic()
     table_header = ['model_type', 'fused_nodes', 'ort_time', 'aot_time', 'speedup']
     table_data  = []
