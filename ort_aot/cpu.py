@@ -228,7 +228,6 @@ class CPUCodeGen(common.NodeVisitor):
         if node.has_vectorization:
             code += """
 #include <mipp/mipp.h>
-using namespace mipp;
 #define __SIMD__ 1
 """
         code += """

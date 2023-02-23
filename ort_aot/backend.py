@@ -17,6 +17,38 @@ import cpufeature
 import multiprocessing
 import shutil
 
+class GetVecLine(object):
+    def __init__(self, compiler_func:callable):
+        super().__init__()
+        self.compiler_func = compiler_func
+        self.func_name = "get_vec_line"
+        self.func_handle = None
+
+    def code_gen(self):
+        dtype = 'float'
+        code = f"""
+#include <mipp/mipp.h>
+extern "C" {{
+int {self.func_name}() {{
+    return mipp::N<{dtype}>();
+}}
+
+}}
+"""
+        return code
+    
+    def get_vec_line(self):
+        if self.func_handle:
+            return self.func_handle()
+
+        with tempfile.NamedTemporaryFile() as lib_path:
+            self.compiler_func(self.code_gen(), lib_path.name)
+            import ctypes
+            so = ctypes.CDLL(str(lib_path.name))
+            self.func_handle = getattr(so, self.func_name)
+            self.func_handle.restype = ctypes.c_int
+            return self.func_handle()
+
 
 class MainFunctionForDebug(Igniter_IR.IRNode):
     def __init__(self, function:Igniter_IR.FunctionNode):
@@ -129,8 +161,12 @@ class CppBackend(object):
         self.lib_path = lib_path
         self.target = target
         self.debug_mode = debug_mode
-        self.context: common.HardwareContext = common.HardwareContext(
-            target, 16 if target=="x86_64" else 4)
+        self.context: common.HardwareContext = self.init_context()
+
+    def init_context(self):
+        get_vec_line = GetVecLine(self.compile_to_so).get_vec_line
+        return  common.HardwareContext(
+            self.target, get_vec_line() if self.target=="x86_64" else 4)
 
 
     def get_simd_intrinsics(self):
@@ -145,8 +181,8 @@ class CppBackend(object):
             simd_flag += " -mfma "
         return simd_flag
 
-    def compile_to_so(self, code: str):
-        lib_path = self.lib_path
+    def compile_to_so(self, code: str, overwrite_lib_path:str=None):
+        lib_path = overwrite_lib_path or self.lib_path
         target = self.target
         debug_mode = self.debug_mode
 
@@ -220,9 +256,9 @@ class CppBackend(object):
         #    assert lib_path.exists(), "compile failed"
 
     def compile(self, models_with_name: dict):
+        logger.info("vec_line  = " + str(self.context.vec_lanes))
         debug_mode = self.debug_mode
         function_recipes = []
-
         module = Igniter_IR.ModuleNode(models_with_name)
         graph_lower = lowering.GraphLowering()
         module.lower(graph_lower, self.context)
