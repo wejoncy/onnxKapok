@@ -399,6 +399,6 @@ class CaptureOnnxSubGraph(object):
         node_nums_after_fusion = len(self.graph.node)
         self.fused_node_nums = node_nums_before_fusion - node_nums_after_fusion
         logger.info(
-            f"after fusion, count of nodes reduces from {node_nums_after_fusion} to {node_nums_after_fusion} "
+            f"after fusion, count of nodes reduces from {node_nums_before_fusion} to {node_nums_after_fusion} "
         )
         return model_with_name
