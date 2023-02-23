@@ -63,7 +63,7 @@ jobs:
       # Runs a set of commands using the runners shell
       - name: Run benchmark
         run: |
-          python3 benchmark/run_bench.py
+          python3 benchmark/run_bench.py -v
           echo "done".
           
       - name: upload benchmark results   
