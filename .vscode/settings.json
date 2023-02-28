@@ -1,4 +1,5 @@
 {
     "editor.formatOnSaveMode": "modificationsIfAvailable",
-    "cmake.configureOnOpen": false
+    "cmake.configureOnOpen": false,
+    "python.formatting.provider": "autopep8"
 }

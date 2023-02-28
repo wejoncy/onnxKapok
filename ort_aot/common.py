@@ -4,9 +4,10 @@ import onnx
 import copy
 import enum
 import numpy as np
-import symbolic_shape_infer
 from abc import ABCMeta, abstractmethod
-from logger import logger
+
+from .logger import logger
+from . import symbolic_shape_infer
 
 _ENABLE_PARALLEL_COMPILE = False
 
@@ -79,21 +80,21 @@ NP_TYPE_TO_TENSOR_TYPE = {
     v: k for k, v in TENSOR_TYPE_TO_NP_TYPE.items() if k != onnx.TensorProto.BFLOAT16}
 
 NP_TYPE_C_TYPE = {numpy.bool_: 'bool',
-                  numpy.byte:'int8_t',
-                  numpy.ubyte:'uint8_t',
-                  numpy.short:'short',
-                  numpy.ushort:'unsigned short',
-                  numpy.intc:'int',
-                  numpy.uintc:'unsigned int',
-                  numpy.int_:'long',
+                  numpy.byte: 'int8_t',
+                  numpy.ubyte: 'uint8_t',
+                  numpy.short: 'short',
+                  numpy.ushort: 'unsigned short',
+                  numpy.intc: 'int',
+                  numpy.uintc: 'unsigned int',
+                  numpy.int_: 'long',
                   numpy.int64: 'int64_t',
-                  numpy.uint:'unsigned long',
-                  numpy.longlong:'long long',
-                  numpy.ulonglong:'unsigned long long',
-                  numpy.single:'float',
+                  numpy.uint: 'unsigned long',
+                  numpy.longlong: 'long long',
+                  numpy.ulonglong: 'unsigned long long',
+                  numpy.single: 'float',
                   numpy.float32: 'float',
-                  numpy.double:'double',
-                  numpy.longdouble:'long double',
+                  numpy.double: 'double',
+                  numpy.longdouble: 'long double',
                   }
 
 
@@ -121,6 +122,7 @@ class SpecialVar(object):
         self.parallel_loop_start = "p_loop_start"
         self.parallel_loop_end = "p_loop_end"
         self.dynamic_shape_args = "dynamic_shape_args"
+        self.rbase = "rbase"
 
 
 def add_all_intermidiate_values(model):
@@ -130,8 +132,7 @@ def add_all_intermidiate_values(model):
     for node in model_proto.graph.node:
         for output in node.output:
             if output not in org_outputs:
-                model_proto.graph.output.extend(
-                    [onnx.ValueInfoProto(name=output)])
+                model_proto.graph.output.extend([onnx.ValueInfoProto(name=output)])
     return model_proto
 
 
@@ -198,20 +199,13 @@ class OnnxInGraph(object):
             type_shape_dict = dict()
             for value_info in symbol_shape.graph.value_info:
                 dim = value_info.type.tensor_type.shape.dim
-                type_shape_dict[value_info.name] = (
-                    value_info.type.tensor_type.elem_type,
-                    [d.dim_value or d.dim_param for d in dim],
-                )
+                type_shape_dict[value_info.name] = (value_info.type.tensor_type.elem_type, [
+                                                    d.dim_value or d.dim_param for d in dim],)
 
             for inp in model.graph.input:
                 dim = inp.type.tensor_type.shape.dim
-                assert inp.name not in type_shape_dict, (
-                    "repeat input name: %s" % inp.name
-                )
-                type_shape_dict[inp.name] = (
-                    inp.type.tensor_type.elem_type,
-                    [d.dim_value or d.dim_param for d in dim],
-                )
+                assert inp.name not in type_shape_dict, ("repeat input name: %s" % inp.name)
+                type_shape_dict[inp.name] = (inp.type.tensor_type.elem_type, [d.dim_value or d.dim_param for d in dim],)
 
             return type_shape_dict, {}
         import transformers
@@ -225,13 +219,10 @@ class OnnxInGraph(object):
         inputs = tokenizer("Hello, my dog is cute", return_tensors="np")
         # inputs["input_mask"] = inputs["attention_mask"]
         # del inputs["attention_mask"]
-        sess = ort.InferenceSession(
-            path_or_bytes=model_proto.SerializeToString())
+        sess = ort.InferenceSession(path_or_bytes=model_proto.SerializeToString())
         if sess.get_inputs()[0].name == "input_ids":
             ret = sess.run([i.name for i in sess.get_outputs()], dict(inputs))
-            runtime_shape = {
-                key.name: ret[idx].shape for idx, key in enumerate(sess.get_outputs())
-            }
+            runtime_shape = {key.name: ret[idx].shape for idx, key in enumerate(sess.get_outputs())}
         else:
             runtime_shape = {}
 
@@ -277,9 +268,9 @@ class OnnxInGraph(object):
                 self.consumed_by[inp].append(node)
 
         for inp in self.graph.input:
-            self.node_name2module["out_"+inp.name] = inp
+            self.node_name2module["out_" + inp.name] = inp
         self.graph_input_names.extend(
-            ["out_"+inp.name for inp in self.graph.input])
+            ["out_" + inp.name for inp in self.graph.input])
 
         for out in self.graph.output:
             self.node_name2module[
@@ -288,9 +279,10 @@ class OnnxInGraph(object):
         self.graph_output_names = [
             "out_" + out.name for out in self.graph.output]
         if infer_shape:
-            symbol_shape, rt_shape = self.get_all_shape_from_onnx_model(
-                self.model_proto)
+            symbol_shape, rt_shape = self.get_all_shape_from_onnx_model(self.model_proto)
             self.tensor_type_shape_info = symbol_shape
+            for initializer in self.graph.initializer:
+                self.tensor_type_shape_info[initializer.name] = (initializer.data_type, list(initializer.dims))
             self.rt_shape = rt_shape
 
 
@@ -318,17 +310,18 @@ class IndexSubGraph(object):
                     self.output_name_ref_c.pop(ink)
 
         mut_input_name = []
-        for ink,count in self.input_name_ref_c.items():
+        for ink, count in self.input_name_ref_c.items():
             if not is_constant_func(ink):
                 mut_input_name.append(ink)
-        
+
         # re order inputs/output by dtype
         non_float_idx = []
         for idx, ink in enumerate(mut_input_name):
             if tensor_type_shape_info[ink][0] != 1:
                 non_float_idx.append(idx)
         if len(non_float_idx) > 1:
-            logger.info(f"subgraph has multiple non-float32 inputs, skip. {len(self.sub_graph_nodes)} nodes was skipped.")
+            logger.info(
+                f"subgraph has multiple non-float32 inputs, skip. {len(self.sub_graph_nodes)} nodes was skipped.")
             return
         if not non_float_idx or non_float_idx[0] == 1 or len(mut_input_name) == 1:
             pass

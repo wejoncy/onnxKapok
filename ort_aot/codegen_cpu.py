@@ -1,5 +1,6 @@
-from ir import *
-import common
+from .ir import *
+from . import common
+
 
 def _get_type(t):
     out_dtype = common.NP_TYPE_C_TYPE[t.type]
@@ -9,13 +10,13 @@ def _get_type(t):
 class CPUCodeGen(common.NodeVisitor):
     def __init__(self):
         super().__init__()
-        
-    def visit(self, node :IRNode, context: common.CodeGenContext, indent: int):
+
+    def visit(self, node: IRNode, context: common.CodeGenContext, indent: int):
         fn = getattr(self, node.__class__.__name__)
-        assert fn is not None,  "unimplemented node: %s" % node.__class__.__name__
+        assert fn is not None, "unimplemented node: %s" % node.__class__.__name__
         return fn(node, context, indent)
-    
-    def Loop(self, node :IRNode, var_context: common.CodeGenContext, indent: int):
+
+    def Loop(self, node: IRNode, var_context: common.CodeGenContext, indent: int):
         var_map = var_context.var_map
         vec_var_set = var_context.vectorized_var_set
         need_indent = " " * indent
@@ -36,14 +37,10 @@ class CPUCodeGen(common.NodeVisitor):
                 else:
                     assert False, "unsupported reduction type: %s" % node.reduction_var[str_var]
 
-                dec_header += need_indent + \
-                    f"float {var_map[str_var]} = {init_val}f;\n"
+                dec_header += need_indent + f"float {var_map[str_var]} = {init_val}f;\n"
                 if node.vectorization:
                     dtype = _get_type(buffer.dtype)
-                    dec_header += (
-                        need_indent
-                        + f"mipp::Reg<{dtype}> vec_{var_map[str_var]} = 0.0f;\n"
-                    )
+                    dec_header += (need_indent + f"mipp::Reg<{dtype}> vec_{var_map[str_var]} = 0.0f;\n")
                     vec_var_set.add(var_map[str_var])
                     node.var_need_post_process[str_var] = f"vec_{var_map[str_var]}"
             else:
@@ -62,20 +59,12 @@ class CPUCodeGen(common.NodeVisitor):
         src += need_indent
         if node.parallel:
             p_var = f"{node.var}"
-            p_var += (
-                f"_{node.parallel_nest_loop.var}" if node.parallel_nest_loop else ""
-            )
+            p_var += (f"_{node.parallel_nest_loop.var}" if node.parallel_nest_loop else "")
             src += f"for (int {p_var}={common.SpecialVar().parallel_loop_start}; {p_var}<{common.SpecialVar().parallel_loop_end}; {p_var}+={node.step}){{\n"
             if node.parallel_nest_loop:
-                src += (
-                    need_indent+need_indent
-                    + f"auto {node.var} = {p_var}/{node.parallel_nest_loop.end};\n"
-                )
+                src += (need_indent + need_indent + f"auto {node.var} = {p_var}/{node.parallel_nest_loop.end};\n")
                 nest_var = node.parallel_nest_loop.var
-                src += (
-                    need_indent+need_indent
-                    + f"auto {nest_var} = {p_var}%{node.parallel_nest_loop.end};\n"
-                )
+                src += (need_indent + need_indent + f"auto {nest_var} = {p_var}%{node.parallel_nest_loop.end};\n")
         else:
             # if node.depth == 0 and node.start == 0:
             #    if not node.end.is_Number:
@@ -87,14 +76,13 @@ class CPUCodeGen(common.NodeVisitor):
 
         if isinstance(node.body, list):
             for idx, g in enumerate(node.body):
-                src += g.code_gen(self,var_context, indent + 4)
+                src += g.code_gen(self, var_context, indent + 4)
         else:
-            src += node.body.code_gen(self,var_context, indent + 4)
+            src += node.body.code_gen(self, var_context, indent + 4)
         src = src + need_indent + "}\n"
         return src
 
-
-    def PostProcessBlock(self, node :IRNode, var_context: common.CodeGenContext, indent: int):
+    def PostProcessBlock(self, node: IRNode, var_context: common.CodeGenContext, indent: int):
         var_map = var_context.var_map
         need_indent = " " * indent
         to_be_handled_vars_map = node.body[0].var_need_post_process
@@ -108,29 +96,22 @@ class CPUCodeGen(common.NodeVisitor):
             vec_func = node.op_map[node.global_connections[s_var].producers[0].op_type]
             w_var = var_map[s_var]
             if vec_func == "hadd":
-                src += need_indent + \
-                    f"{w_var} = {w_var} + mipp::{vec_func}({v_var});\n"
+                src += need_indent + f"{w_var} = {w_var} + mipp::{vec_func}({v_var});\n"
             elif vec_func == "hmax":
-                src += (
-                    need_indent
-                    + f"{w_var} = std::max({w_var} , mipp::{vec_func}({v_var}));\n"
-                )
+                src += (need_indent + f"{w_var} = std::max({w_var} , mipp::{vec_func}({v_var}));\n")
             else:
                 raise NotImplementedError(f"not support {vec_func} yet")
             src += need_indent + f"{v_var} = {w_var};\n"
         return src
 
-
-    def FunctionNode(self, node :IRNode, var_context: common.CodeGenContext, indent: int):
+    def FunctionNode(self, node: IRNode, var_context: common.CodeGenContext, indent: int):
         if not var_context:
             var_map = node.body[0].var_map
         # node.output[0].dtype.tensor_type.shape.dim[1]
 
         # in_param = [f"const float* e_{var_map[i.name]}" for i in node.input]
 
-        in_param = [
-            f"const void** {common.SpecialVar().input_args}",
-        ]
+        in_param = [f"const void** {common.SpecialVar().input_args}",]
         if node.body[0].body.parallel:
             in_param += [
                 f" ptrdiff_t  {common.SpecialVar().parallel_loop_start}, ptrdiff_t {common.SpecialVar().parallel_loop_end}"
@@ -169,7 +150,7 @@ class CPUCodeGen(common.NodeVisitor):
             for idx, sp in enumerate(node.shape_var)
         ]
         code += "\n".join(parse_shape) + "\n\n"
-        
+
         parse_output = [
             need_indent
             + f"{out_dtype[idx]}* {restrict} e_{var_map[i.name]} = ({out_dtype[idx]}*){common.SpecialVar().output_args}[{idx}];"
@@ -181,7 +162,7 @@ class CPUCodeGen(common.NodeVisitor):
         for const in node.const_var:
             if isinstance(const, onnx.NodeProto):
                 if const.attribute[0].type == common.AttributeType.TENSOR:
-                    assert len(const.attribute) ==1
+                    assert len(const.attribute) == 1
                     de_composed_const_var[const.output[0]] = const.attribute[0].t
                 else:
                     de_composed_const_var[const.output[0]] = const
@@ -204,21 +185,20 @@ class CPUCodeGen(common.NodeVisitor):
             else:
                 # we have expanded the const var to scalar
                 continue
-                #suffix = "f" if np_array.dtype == np.float32 else ""
-                #v = np_array.reshape(-1)[0]
-                #const_declare = f"static constexpr {dtype} e_{var_map[name]} = {v}{suffix};\n"
+                # suffix = "f" if np_array.dtype == np.float32 else ""
+                # v = np_array.reshape(-1)[0]
+                # const_declare = f"static constexpr {dtype} e_{var_map[name]} = {v}{suffix};\n"
             code += need_indent + const_declare
 
         node.body[0].hw_context = node.hw_context
 
-        code += node.body[0].code_gen(self,None, indent)
+        code += node.body[0].code_gen(self, None, indent)
         code += need_indent + "return 12;\n"
         code += "}\n"
 
         return code
 
-
-    def ModuleNode(self, node :IRNode, var_context: common.CodeGenContext, indent: int):
+    def ModuleNode(self, node: IRNode, var_context: common.CodeGenContext, indent: int):
         code = """
 #include <cmath>
 #include <algorithm>
@@ -244,8 +224,7 @@ extern "C"{
         code += "}\n"
         return code
 
-
-    def ComputeNode(self, node :ComputeNode, var_context: common.CodeGenContext, indent: int):
+    def ComputeNode(self, node: ComputeNode, var_context: common.CodeGenContext, indent: int):
         def gen_cpp_code_for_op(var_context: common.CodeGenContext):
             var_map = var_context.var_map
             vec_var_map = var_context.vectorized_var_set
@@ -283,7 +262,7 @@ extern "C"{
             ):
                 named_vars_i[1] = "-" + named_vars_i[1]
                 node.op_type_ = "Add"
-                
+
             if (
                 node.op_type == "Div"
                 and is_input_1_vec
@@ -291,12 +270,12 @@ extern "C"{
             ):
                 dtype = _get_type(node.input[0].dtype)
                 named_vars_i[0] = f"mipp::Reg<{dtype}>({named_vars_i[0]})"
-                
+
             if (
                 node.op_type == "Pow" and named_vars_i[1] == 0.5
             ):
                 node.op_type_ = "Sqrt"
-                
+
             # always trying to put the constant to the right
             if (not isinstance(named_vars_i[0], str) or is_input_1_vec) and node.op_type in ["Add", "Mul"]:
                 suffix[0], suffix[1] = suffix[1], suffix[0]
@@ -305,10 +284,10 @@ extern "C"{
             raw_named_vars_1 = named_vars_i[-1]
 
             # add suffix 'f' for float constant
-            for idx,var in enumerate(named_vars_i):
+            for idx, var in enumerate(named_vars_i):
                 named_vars_i[idx] = f"{var}{suffix[idx]}"
 
-            if len(named_vars_i)==3 and suffix[-1] == "f" and node.vectorization:
+            if len(named_vars_i) == 3 and suffix[-1] == "f" and node.vectorization:
                 dtype = _get_type(node.input[-1].dtype)
                 named_vars_i[-1] = f"mipp::Reg<{dtype}>({named_vars_i[-1]})"
 
@@ -379,17 +358,16 @@ extern "C"{
         src += space_indent + gen_cpp_code_for_op(var_context)
         return src
 
-
-    def ReduceNode(self, node :IRNode, var_context: common.CodeGenContext, indent: int):
+    def ReduceNode(self, node: IRNode, var_context: common.CodeGenContext, indent: int):
         var_map = var_context.var_map
         vec_var_map = var_context.vectorized_var_set
         code = "\n"
         input_key = [i.name for i in node.input]
         output_key = [i.name for i in node.output]
-        out_dtype  = _get_type(node.output[0].dtype)
+        out_dtype = _get_type(node.output[0].dtype)
         try:
             input_1 = var_map[var_map[input_key[1]]]
-        except:
+        except BaseException:
             input_1 = np.array([np.NaN])
             pass
         assert len(input_key) == 1 or (input_1[0] != np.NaN).all()
@@ -417,7 +395,7 @@ extern "C"{
             raise Exception(f"not supported {node.body.op_type}")
         return code
 
-    def LoadNode(self, node :IRNode, var_context: common.CodeGenContext, indent: int):
+    def LoadNode(self, node: IRNode, var_context: common.CodeGenContext, indent: int):
         var_map = var_context.var_map
         vec_var_map = var_context.vectorized_var_set
         space_indent = " " * indent
@@ -425,7 +403,7 @@ extern "C"{
         var_name = node.input.name
         assert var_name in var_map, f"name {var_name} not found in var_map"
         named_var = var_map[var_name]
-        
+
         dtype = _get_type(node.input.dtype)
         # if named_var is constant, no need to load
         if named_var in var_map:
@@ -434,11 +412,7 @@ extern "C"{
             assert isinstance(v, (np.ndarray))
             if node.vectorization:
                 vec_var_map.add(named_var)
-                return (
-                    code
-                    + space_indent
-                    + f"mipp::Reg<float> vec_{named_var} = {v[0]}f;\n"
-                )
+                return (code + space_indent + f"mipp::Reg<float> vec_{named_var} = {v[0]}f;\n")
             else:
                 return code + space_indent + f"auto {named_var} = {v[0]}f;\n"
 
@@ -456,7 +430,7 @@ extern "C"{
 
             if node.input.dtype.type == np.bool_:
                 vec_type = "mipp::Msk<mipp::N<float>()>"
-            else:                
+            else:
                 vec_type = f"mipp::Reg<{dtype}>"
             return (
                 code
@@ -466,8 +440,7 @@ extern "C"{
         else:
             return code + space_indent + f"auto {named_var} = {load_addr};\n"
 
-
-    def StoreNode(self, node :IRNode, var_context: common.CodeGenContext, indent: int):
+    def StoreNode(self, node: IRNode, var_context: common.CodeGenContext, indent: int):
         var_map = var_context.var_map
         code = ""
         space_indent = code + " " * indent
@@ -487,8 +460,7 @@ extern "C"{
         else:
             return space_indent + f"e_{annotated_var} = {named_var};\n"
 
-
-    def ExecutionBlock(self, node :ExecutionBlock, var_context: common.CodeGenContext, indent: int):
+    def ExecutionBlock(self, node: ExecutionBlock, var_context: common.CodeGenContext, indent: int):
         assert not var_context
         var_context = common.CodeGenContext(node.var_map)
         var_map = var_context.var_map
@@ -518,5 +490,91 @@ extern "C"{
                     )
                     fvs.pop(str_var)
         src += dec_for_sub_loop
-        src += node.body.code_gen(self,var_context, indent)
+        src += node.body.code_gen(self, var_context, indent)
         return src
+
+
+class MainFunctionForDebug(IRNode):
+    def __init__(self, function: FunctionNode):
+        self.body = None
+        self.func_name = function.name
+        self.in_arg_type_shape = function.input
+        self.out_arg_type_shape = function.output
+
+    def code_gen(self, visitor: common.NodeVisitor, var_context: common.CodeGenContext, indent: int = 0):
+        input_dtypes = [i.dtype for i in self.in_arg_type_shape]
+        input_ctype = [common.NP_TYPE_C_TYPE[i.type] for i in input_dtypes]
+        input_shapes = [i.shape.copy() for i in self.in_arg_type_shape]
+        output_shapes = [i.shape.copy() for i in self.out_arg_type_shape]
+
+        in_dynamic_shape_axis = [
+            [idx for idx, i in enumerate(in_shape) if not i.is_number]
+            for in_shape in input_shapes
+        ]
+        out_dynamic_shape_axis = [
+            [idx for idx, i in enumerate(out_shape) if not i.is_number]
+            for out_shape in output_shapes
+        ]
+        for input_shape, in_dy_axis in zip(input_shapes, in_dynamic_shape_axis):
+            if input_shape == []:
+                input_shape.append(1)
+                continue
+            for dy in in_dy_axis:
+                input_shape[dy] = 24
+            if 0 in in_dy_axis:
+                input_shape[0] = 1
+
+        for output_shape, out_dy_axis in zip(output_shapes, out_dynamic_shape_axis):
+            for dy in out_dy_axis:
+                output_shape[dy] = 24
+            if 0 in out_dy_axis:
+                output_shape[0] = 1
+        input_shapes = [tuple(input_shape) for input_shape in input_shapes]
+        import numpy as np
+        numel_inputs = [np.prod(i) for i in input_shapes]
+        numel_outputs = [np.prod(i) for i in output_shapes]
+
+        max_dim = max([len(iv) for iv in in_dynamic_shape_axis])
+        max_elem = max([np.prod(iv) for iv in input_shapes])
+        idx = [ind for ind, iax in enumerate(
+            in_dynamic_shape_axis) if len(iax) == (max_dim) and np.prod(input_shapes[ind]) == max_elem][0]
+
+        in_dy_axis = in_dynamic_shape_axis[idx]
+        input_shape = input_shapes[idx]
+
+        code = f"""
+#include <cassert>
+int main(int argc, const char* argv[]) {{
+    int n =0;
+"""
+        buf_read = []
+        r_vars = [f'input{i}' for i in range(len(input_shapes))]
+        for i in range(len(input_shapes)):
+            buf_read.append(
+                f"""
+    FILE *fp{i}=fopen("a{i}.bin","rb");
+    auto* input{i} = new {input_ctype[i]}[{numel_inputs[i]}];
+    n = fread(input{i}, sizeof({input_ctype[i]}), {numel_inputs[i]}, fp{i});
+    assert(n=={numel_inputs[i]});
+    fclose(fp{i});
+                """
+            )
+        buf_write = []
+        w_vars = [f'output{i}' for i in range(len(output_shapes))]
+        for i in range(len(output_shapes)):
+            buf_write.append(
+                f"""
+    auto* output{i} = new float[{numel_outputs[i]}];
+                """
+            )
+        code += "\n".join(buf_read)
+        code += "\n".join(buf_write)
+        code += f"""
+    const void* input_ptr[] = {{{', '.join(r_vars)}}};
+    void* output_ptr[] = {{{', '.join(w_vars)}}};
+    const int64_t shape_ptr[] = {{{input_shape[in_dy_axis[0]]},{input_shape[in_dy_axis[1]]}}};
+    {self.func_name}(input_ptr, 0, {input_shape[0]*input_shape[1]},  shape_ptr,output_ptr);
+    return 0;
+}}
+        """
+        return code

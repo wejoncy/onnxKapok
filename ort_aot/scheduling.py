@@ -1,12 +1,12 @@
-import ir as Igniter_IR
-from logger import logger
-import sympy_utils
-import sympy
+from . import ir as Igniter_IR
+from .logger import logger
+from . import sympy_utils
 
+import sympy
 from typing import Union, List, Tuple, Dict, Set
 from collections import defaultdict, deque, OrderedDict
 import copy
-
+from abc import ABCMeta, abstractmethod
 
 
 class Schedule(object):
@@ -23,6 +23,7 @@ class Schedule(object):
             return False
         return True
 
+    @abstractmethod
     def do_fusion_recursive(self, loop1: Igniter_IR.Loop, loop2: Igniter_IR.Loop):
         if not self.can_fusion_op(loop1, loop2):
             raise Exception("can not fusion loop")
@@ -41,7 +42,7 @@ class Schedule(object):
         return loop1
 
     def update_IO_after_fusion_op(
-        self, bb1: Igniter_IR.ExecutionBlock, bb2: Igniter_IR.ExecutionBlock, 
+        self, bb1: Igniter_IR.ExecutionBlock, bb2: Igniter_IR.ExecutionBlock,
         global_input: Set[str], global_output: Set[str]
     ):
         bb1.var_map.update(bb2.var_map)
@@ -65,7 +66,7 @@ class Schedule(object):
                 # a var is not in bb1.input and not bb1.output
                 new_input.add(var)
             else:
-                bb2.forward_var_set[-1][var.name] = var 
+                bb2.forward_var_set[-1][var.name] = var
 
         for k, v in tmp_var_but_across_loop.items():
             if k not in bb1.forward_var_set[-1]:
@@ -75,6 +76,7 @@ class Schedule(object):
         bb1.output = list(new_output)
         bb1.input = list(new_input)
 
+    @abstractmethod
     def fusion_op(self, blocks: List[Igniter_IR.ExecutionBlock], global_input: Set[str], global_output: Set[str]):
         if len(blocks) < 2:
             return blocks
@@ -105,6 +107,7 @@ class Schedule(object):
         new_blocks.extend(de_blocks)
         return new_blocks
 
+    @abstractmethod
     def tile_inner_loop(
         self, blocks: List[Igniter_IR.ExecutionBlock], tile_size: int = 16
     ) -> List[Igniter_IR.ExecutionBlock]:
@@ -161,6 +164,7 @@ class Schedule(object):
         blocks[0].body = do_tile_loop(bb1.body)
         return blocks
 
+    @abstractmethod
     def vectoring_inner_loop(
         self, blocks: List[Igniter_IR.ExecutionBlock], lanes: int = 16
     ) -> List[Igniter_IR.ExecutionBlock]:
@@ -194,6 +198,7 @@ class Schedule(object):
                 ), "op in this loop should not be vectorized"
                 return loop
             loop.vectorization = True
+            loop.step = lanes
             for op in loop.body:
                 assert isinstance(
                     op, Igniter_IR.IRNode
@@ -204,6 +209,7 @@ class Schedule(object):
         blocks[0].body = do_vectoring_loop(bb1.body)
         return blocks
 
+    @abstractmethod
     def parallelize_outer_loop(
         self, blocks: List[Igniter_IR.ExecutionBlock], parallel_depth: int = 2
     ) -> List[Igniter_IR.ExecutionBlock]:
@@ -243,6 +249,103 @@ class Schedule(object):
             ), "only support parallelize natural nest loop"
             loop_depth_out_1.body = loop_depth_out_2.body
             loop_depth_out_1.parallel_nest_loop = loop_depth_out_2
+        elif parallel_depth == 1:
+            pass
+        else:
+            raise NotImplementedError(
+                "only support parallelize outer loop with depth 1"
+            )
+
+        return blocks
+
+
+class GPUSchedule(Schedule):
+    def __init__(self):
+        super().__init__()
+
+    def tile_inner_loop(
+        self, blocks: List[Igniter_IR.ExecutionBlock], tile_size: int = 16
+    ) -> List[Igniter_IR.ExecutionBlock]:
+        # don't need it
+        return blocks
+
+    def vectoring_inner_loop(
+        self, blocks: List[Igniter_IR.ExecutionBlock], lanes: int = 16
+    ) -> List[Igniter_IR.ExecutionBlock]:
+        assert (
+            len(blocks) == 1
+        ), " only support one block now, but got {} blocks".format(len(blocks))
+        bb1: Igniter_IR.ExecutionBlock = blocks[0]
+        if not isinstance(bb1.body, Igniter_IR.Loop):
+            return blocks
+
+        def do_vectoring_loop(loop: Igniter_IR.Loop):
+            if loop.depth > 0:
+                if isinstance(loop.body, list):
+                    loop.body = [do_vectoring_loop(i) for i in loop.body]
+                else:
+                    loop.body = do_vectoring_loop(loop.body)
+                return loop
+
+            try_simplify = (loop.end - loop.start) > lanes
+            if (
+                loop.start != 0
+                or (try_simplify.is_Boolean and try_simplify)
+                or loop.step != 1
+                or loop.vectorization
+                or loop.parallel
+            ):
+                loop.attributes = Igniter_IR.LoopAttr.ScalarLoop
+                assert (
+                    loop.body[0].vectorization == False
+                ), "op in this loop should not be vectorized"
+                return loop
+            loop.vectorization = True
+            loop.step = loop.end
+            for op in loop.body:
+                assert isinstance(
+                    op, Igniter_IR.IRNode
+                ), f"expected op to be IRNode, but got {type(op)}"
+                op.vectorization = True
+            return loop
+
+        blocks[0].body = do_vectoring_loop(bb1.body)
+        return blocks
+
+    def parallelize_outer_loop(
+        self, blocks: List[Igniter_IR.ExecutionBlock]
+    ) -> List[Igniter_IR.ExecutionBlock]:
+        assert (
+            len(blocks) == 1
+        ), " only support one block now, but got {} blocks".format(len(blocks))
+        bb = blocks[0]
+        assert isinstance(
+            bb.body, Igniter_IR.Loop), "only support parallelize outer loop"
+        parallel_depth = bb.body.depth
+        if parallel_depth < 1:
+            return blocks
+        assert (
+            bb.body.start == 0 and bb.body.step == 1
+        ), "only support parallelize natural nest loop"
+
+        bb.body.parallel = True
+
+        if parallel_depth >= 2:
+            this_loop: Igniter_IR.Loop = bb.body
+            nest_loops = []
+            while this_loop.depth > 1:
+                assert isinstance(
+                    this_loop.body, Igniter_IR.Loop
+                ), "only support parallelize outer loop"
+                assert (
+                    this_loop.body.start == 0 and this_loop.body.step == 1
+                ), "only support parallelize natural nest loop"
+                nest_loops.append(this_loop.body)
+                this_loop = this_loop.body
+
+            loop_depth_out_1: Igniter_IR.Loop = bb.body
+            loop_depth_out_1.body = nest_loops[-1].body
+            loop_depth_out_1.parallel_nest_loop = nest_loops
         elif parallel_depth == 1:
             pass
         else:
