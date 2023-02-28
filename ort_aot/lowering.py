@@ -8,11 +8,58 @@ import utils
 
 from typing import Union, List, Tuple, Dict, Set
 from collections import defaultdict
-import onnx
+from functools import wraps
+
+
+def Singleton(cls):
+    instances = {}
+
+    @wraps(cls)
+    def getinstance(*args, **kw):
+        if cls not in instances:
+            instances[cls] = cls(*args, **kw)
+        return instances[cls]
+    return getinstance
+
+
+@Singleton
+class UniqueNameGenerator(object):
+    def __init__(self):
+        self.count = 0
+
+    def get_unique_var_name(self, prefix):
+        self.count += 1
+        return prefix + str(self.count)
+
+
+def create_load_or_store(buf: ir.ComputeBuffer, is_load: bool, target: str):
+    if target != "triton":
+        if is_load:
+            return [ir.LoadNode(buf)]
+        else:
+            return [ir.StoreNode(buf)]
+    else:
+        # range_id_name = UniqueNameGenerator().get_unique_var_name("triton_range_")
+        # range_buf = ir.ComputeBuffer(range_id_name, shape=buf.shape[-1:])
+        # range_ir = ir.RangeNode(0, buf.shape[-1], 1, range_buf)
+        #
+        # add_id_name = UniqueNameGenerator().get_unique_var_name("triton_add_")
+        # add_out = ir.ComputeBuffer(add_id_name, shape=buf.shape[-1:])
+        # addr_ir = ir.ComputeNode("Add", [buf, range_buf], [add_out], add_id_name+"_add")
+        #
+        mask_id_name = UniqueNameGenerator().get_unique_var_name("triton_mask_")
+        mask_buf = ir.ComputeBuffer(mask_id_name, shape=buf.shape[-1:])
+        # mask_ir = ir.MaskNode([range_buf, "vec_loop_step"], mask_buf)
+
+        if is_load:
+            return [ir.MaskLoadNode(buf, mask_buf)]
+        else:
+            return [ir.MaskStoreNode(buf, mask_buf)]
 
 
 def insert_load_and_store(
-    block: ir.ExecutionBlock, global_buffer: common.GraphIOBuffer, c_graph: execution_planer.ConnectionGraph
+    block: ir.ExecutionBlock, global_buffer: common.GraphIOBuffer,
+    c_graph: execution_planer.ConnectionGraph, target: str = "x86_64"
 ):
     input_name_map = {inp.name: inp for inp in block.input}
     output_name_map = {inp.name: inp for inp in block.output}
@@ -30,19 +77,17 @@ def insert_load_and_store(
             if (
                 inp in block.load or inp in input_name_map
             ) and producer_op not in node_sets.ReduceNodeSetInternal():
-                load_buf = (
-                    block.load[inp] if inp in block.load else None
-                ) or input_name_map[inp]
+                load_buf = block.load[inp] if inp in block.load else input_name_map[inp]
                 # we just skip unused load for constant scalar
                 if (load_buf.data is not None and load_buf.data.size == 1) or load_buf.name in load_cache:
                     continue
                 load_cache.add(load_buf.name)
-                new_group.append(ir.LoadNode(load_buf))
+                new_group.extend(create_load_or_store(load_buf, True, target))
         new_group.append(g)
         for out in g.output:
             if out in output_name_map and not isinstance(g, ir.ReduceNode):
                 load_cache.add(out)
-                new_group.append(ir.StoreNode(output_name_map[out]))
+                new_group.extend(create_load_or_store(output_name_map[out], False, target))
 
     block.group = new_group
 
@@ -52,9 +97,10 @@ def analyze_io(
     global_buffer: common.GraphIOBuffer,
     c_graph: execution_planer.ConnectionGraph,
     cached_buffer: Dict[str, ir.ComputeBuffer],
+    target: str = "x86_64"
 ):
     # should we keep buffer here?
-    #self.cached_buffer = cached_buffer
+    # self.cached_buffer = cached_buffer
     inputs = defaultdict(lambda: 0)
     outputs = defaultdict(lambda: 0)
     loads = set()
@@ -96,49 +142,17 @@ def analyze_io(
                 outputs.pop(out_name)
 
     for v in outputs:
-        assert v not in cached_buffer and v not in cached_buffer, "create buffer twice is not allowed"        
-        if v in c_graph.egraph.graph_output_names:
-            tensor: onnx.Tensor = c_graph.egraph.node_name2module[v]
-            buffer = utils.convert_onnx_value_to_computebuffer(
-                tensors=tensor, prefix="out_")
-            v = v
-        else:
-            type_and_shape = c_graph.egraph.tensor_type_shape_info[v]
-            last_dim = type_and_shape[1][-1] if type_and_shape[1] else 1
-            sp = [sympy_utils.sympy_symbol(last_dim)]
-            dtype = common.TENSOR_TYPE_TO_NP_TYPE[type_and_shape[0]]
-            buffer = ir.ComputeBuffer(v, dtype, sp)
-        cached_buffer[v] = buffer
+        assert v in cached_buffer, "found unhandled output buffer!!!"
+        buffer = cached_buffer[v]
+        if v not in c_graph.egraph.graph_output_names:
+            buffer.attr_cross_loop = True
         block.output.append(buffer)
 
-    for v in inputs:        
-        if v in external_buffer_out_set:
-            # print("intermediate value appears in output, skip load", v)
-            # continue
-            # if we didn't load it, how can we read the var in the follow-up op?
-            pass
-        if v in cached_buffer:
-            type_and_shape = c_graph.egraph.tensor_type_shape_info[v.replace('out_','')]
-            sp = type_and_shape[1][-1] if type_and_shape[1] else 1
-            assert (
-                sympy_utils.sympy_symbol(sp)
-                            == (cached_buffer[v].shape[-1] if cached_buffer[v].shape else 1)
-            ), "???buffer not matched"
-            buffer = cached_buffer[v]
-        elif  v in c_graph.egraph.graph_input_names:
-            tensor: onnx.Tensor = c_graph.egraph.node_name2module[v]
-            buffer = utils.convert_onnx_value_to_computebuffer(tensors=tensor, prefix="out_")
-            cached_buffer[v] = buffer
-        elif  'out_'+v in c_graph.egraph.graph_output_names: # the input is also graph output
-            v= 'out_'+v
-            buffer = cached_buffer[v]
-        else:
-            buffer = cached_buffer[v]
-        # elif v in c_graph.egraph.produced_by:
-        #    tensor:onnx.Tensor = c_graph.egraph.produced_by[v][0]
-        #    dims = tensor.shape.dim
-        #    shape = [dim.dim_value or dim.dim_param for dim in dims]
-        #    buffer = ComputeBuffer(v,tensor.elem_type,shape)
+    for v in inputs:
+        assert v in cached_buffer, "found unhandled output buffer!!!"
+        buffer = cached_buffer[v]
+        if v not in c_graph.egraph.graph_input_names and v not in c_graph.egraph.graph_output_names:
+            buffer.attr_cross_loop = True
         block.input.append(buffer)
 
     for ov in loads:
@@ -155,41 +169,46 @@ def analyze_io(
         cached_buffer[v] = buffer
         block.load[ov] = buffer
 
-    insert_load_and_store(block, global_buffer, c_graph)
+    insert_load_and_store(block, global_buffer, c_graph, target)
     pass
 
 
 class GraphLowering(common.NodeVisitor):
-    def __init__(self):
+    def __init__(self, target: str):
         super().__init__()
-        
-    def visit(self, node :ir.IRNode, context: common.HardwareContext, indent: int=0):
+        self.target = target
+
+    def visit(self, node: ir.IRNode, context: common.HardwareContext, indent: int = 0):
         fn = getattr(self, node.__class__.__name__)
         assert fn is not None,  "unimplemented node: %s" % node.__class__.__name__
         return fn(node, context)
-    
+
     def FunctionNode(self, node: ir.FunctionNode, context: common.HardwareContext):
         assert len(node.body) == 1, "multiple body not supported in function node"
         shape_var = [i for i in node.body[0].shape if i.is_symbol]
         node.shape_var = list(set(shape_var))
         node.shape_var.sort(key=shape_var.index)
 
-        node.body[0].gen_var(node.const_var)
+        node.body[0].gen_var(node.const_var, self.target == "triton")
         node.body[0].analyze_io_connections()
-        
 
     def ModuleNode(self, node: ir.ModuleNode, context: common.HardwareContext):
         allow_vectorize = True
+
         def lower_to_functionNode(blocks: List[ir.ExecutionBlock],
-                                global_buffer: common.GraphIOBuffer,
-                                func_name: str,
-                                allow_vectorize: bool):
+                                  global_buffer: common.GraphIOBuffer,
+                                  func_name: str,
+                                  allow_vectorize: bool):
             for block in blocks:
                 block.lower(self, context)
-            schedule = scheduling.Schedule()
-            blocks = schedule.fusion_op(blocks, set(i.name for i in global_buffer.var_buffer_in), set(i.name for i in global_buffer.var_buffer_out))
+            if self.target == 'triton':
+                schedule = scheduling.GPUSchedule()
+            else:
+                schedule = scheduling.Schedule()
+            blocks = schedule.fusion_op(blocks, set(i.name for i in global_buffer.var_buffer_in),
+                                        set(i.name for i in global_buffer.var_buffer_out))
             blocks = schedule.tile_inner_loop(blocks, context.vec_lanes)
-            if allow_vectorize:
+            if allow_vectorize or self.target == 'triton':
                 blocks = schedule.vectoring_inner_loop(blocks, context.vec_lanes)
             blocks = schedule.parallelize_outer_loop(blocks)
             func = ir.FunctionNode(global_buffer.var_buffer_in, global_buffer.var_buffer_out)
@@ -199,10 +218,9 @@ class GraphLowering(common.NodeVisitor):
             func.hw_context = context
             func.lower(self, context)
             return func
-    
-        
-        for idx,(func_name, model) in enumerate(node.modules.items()):
-            plan = execution_planer.ExecutionPrepare(model)
+
+        for idx, (func_name, model) in enumerate(node.modules.items()):
+            plan = execution_planer.ExecutionPrepare(model, self.target)
             plan.prepare()
             node_group = plan.create_execution_plan(analyze_io)
             function: FunctionNode = lower_to_functionNode(
@@ -213,4 +231,3 @@ class GraphLowering(common.NodeVisitor):
     def ExecutionBlock(self, node: ir.ExecutionBlock, context: common.HardwareContext):
         # add Loop()
         node.body = node.build_loop()
-

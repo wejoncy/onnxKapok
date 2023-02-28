@@ -26,12 +26,15 @@ class ComputeBuffer(object):
         self.shape = self.parse_shape(shape)
         self.data = self.handle_data(data)
         self.loop_index: List[sympy.Expr] = None
+        self.predecessor: IRNode = None
+        self.successor: List[IRNode] = []
+        self.attr_cross_loop = False
 
     def handle_data(self, data):
         if data is None:
             return data
         self.dtype = data.dtype
-        self.shape = data.shape
+        self.shape = self.parse_shape(data.shape)
         return data
 
     def parse_shape(self, shape: list):
@@ -96,7 +99,7 @@ class Loop(IRNode):
         self.body = None
         self.depth = 0
         self.parallel: bool = False
-        self.parallel_nest_loop: Loop = None
+        self.parallel_nest_loop: Union[Loop, List[Loop]] = None
         self.attributes = LoopAttr.ScalarLoop
         self.forward_var_set: Dict[ComputeBuffer] = OrderedDict()
         self.var_need_post_process: OrderedDict = {}
@@ -182,16 +185,14 @@ class ExecutionBlock(IRNode):
         if group[-1] in node_sets.ReduceNodeSetInternal():
             shape = []
             for i in list(group[-1].input_with_shapes.values())[0][1]:
-                ri = re.sub(r'[^a-zA-Z0-9_]+', '_',
-                            i) if isinstance(i, str) else i
+                ri = re.sub(r'[^a-zA-Z0-9_]+', '_', i) if isinstance(i, str) else i
                 shape.append(sympy_utils.sympy_symbol(ri))
             self.has_reduce = True
             self.reduction_var[group[-1].current_node.output[0]] = group[-1].op_type
         else:
             shape = []
             for i in list(group[-1].output_with_shapes.values())[0][1]:
-                ri = re.sub(r'[^a-zA-Z0-9_]+', '_',
-                            i) if isinstance(i, str) else i
+                ri = re.sub(r'[^a-zA-Z0-9_]+', '_', i) if isinstance(i, str) else i
                 shape.append(sympy_utils.sympy_symbol(ri))
         # support scalar
         if len(shape) == 0:
@@ -199,9 +200,7 @@ class ExecutionBlock(IRNode):
         return shape
 
     def build_inner_most_loop(self):
-        self.loop_stack.append(
-            sympy_utils.sympy_symbol(f"i_{str(len(self.loop_stack))}")
-        )
+        self.loop_stack.append(sympy_utils.sympy_symbol(f"i_{str(len(self.loop_stack))}"))
         loop = Loop()
         loop.var = self.loop_stack[-1]
 
@@ -232,7 +231,7 @@ class ExecutionBlock(IRNode):
             body = loop
         return body
 
-    def gen_var(self, external_var):
+    def gen_var(self, external_var, is_triton):
         exist_var = set()
 
         def legal_name(name):
@@ -289,9 +288,12 @@ class ExecutionBlock(IRNode):
             # "only support scalar"
             if v.size > 1:
                 continue
-            
+
             v_v = self.var_map[var]
             self.var_map[v_v] = v
+
+        if is_triton:
+            self.var_map[common.SpecialVar().rbase] = common.SpecialVar().rbase
 
 
 class FunctionNode(IRNode):
@@ -312,6 +314,7 @@ class ModuleNode(IRNode):
         self.body: List[FunctionNode] = []
         self.has_vectorization = False
         self.modules = modules
+
 
 class ComputeNode(IRNode):
     def __init__(self, op_type, inputs, outputs, op_name: str = ""):
@@ -345,33 +348,35 @@ class Indexer:
             stride.append(stride[-1] * shape[i])
         return stride[::-1]
 
-    def code_gen(self, named_var: str, buf: ComputeBuffer):
-        if buf.data is not None and buf.data.size == 1:
+    def code_gen(self, named_var: str, buf: ComputeBuffer, for_triton: bool = False):
+        if (buf.data is not None and buf.data.size == 1) or not buf.shape:
             return f"{named_var}"
         else:
-            shape = buf.shape or (
-                buf.data is not None and buf.data.shape) or [1]
-            index_of_dim_1 = [i for i in range(len(shape)) if shape[i] == 1]
+            shape = buf.shape or (buf.data is not None and buf.data.shape) or [1]
+            shape = shape.copy()
+            shape = shape[-1:] if buf.attr_cross_loop else shape
             stride = self.cal_stride(shape)
-            index: sympy.Expr = buf.loop_index or [
-                sympy_utils.sympy_symbol(f"i_{i}")
-                for i in range(len(shape) - 1, -1, -1)
-            ]
+            if for_triton:
+                shape[-1] = 1
+                if shape == [1]:
+                    return f"{named_var}"
+            index_of_dim_1 = [i for i in range(len(shape)) if shape[i] == 1]
+
+            index: sympy.Expr = buf.loop_index or [sympy_utils.sympy_symbol(
+                f"i_{i}") for i in range(len(shape) - 1, -1, -1)]
             if len(index) > len(shape):
                 index = index[len(index) - len(shape):]
             # broadcast handling
-            br_index = [v for idx, v in enumerate(
-                index) if idx not in index_of_dim_1]
-            br_stride = [v for idx, v in enumerate(
-                stride) if idx not in index_of_dim_1]
+            br_index = [v for idx, v in enumerate(index) if idx not in index_of_dim_1]
+            br_stride = [v for idx, v in enumerate(stride) if idx not in index_of_dim_1]
 
             expand_opt = create_expand_pow_optimization(6)
             res = expand_opt(sympy_utils.sympy_dot(br_index, br_stride))
             gs = re.findall("([a-zA-Z0-9_]+)\*\*(\d)", str(res))
-            assert (
-                gs == []
-            )  # or gs[0][1] == '2', f"TODO fix me when pow {gs[0][1]} or other"
+            assert (gs == [])  # or gs[0][1] == '2', f"TODO fix me when pow {gs[0][1]} or other"
             # res= re.sub('([a-zA-Z0-9_]+)\*\*(\d)','\g<1>*\g<1>',str(res))
+            if for_triton:  # gpu
+                return f"{named_var}+{res}"
             return f"{named_var}[{res}]"
         pass
 
@@ -389,6 +394,58 @@ class LoadNode(IRNode):
         return "Load"
 
 
+class RangeNode(IRNode):
+    def __init__(self, start, end, step, outputs: ComputeBuffer):
+        super().__init__()
+        self.input = [start, end, step]
+        self.output = outputs
+
+    @property
+    def op_type(self):
+        return "Range"
+
+
+class MaskNode(IRNode):
+    def __init__(self, inputs: List[ComputeBuffer], outputs: ComputeBuffer, shape: list = None):  # ComputeBuffer
+        super().__init__()
+        # inputs was block_range and boundary
+        # mask = block_range < boundary
+        self.input = inputs
+        self.shape = shape
+
+    @property
+    def op_type(self):
+        return "Mask"
+
+# usually used for triton
+
+
+class MaskLoadNode(IRNode):
+    def __init__(self, buf: ComputeBuffer, mask: ComputeBuffer):  # ComputeBuffer
+        super().__init__()
+        self.input = [buf, mask]
+        self.dtype = common.TENSOR_TYPE_TO_NP_TYPE[buf.dtype] if not isinstance(
+            buf.dtype, np.dtype) else buf.dtype
+        self.to_buf = "to"
+
+    @property
+    def op_type(self):
+        return "MaskLoadNode"
+
+
+class MaskStoreNode(IRNode):
+    def __init__(self, buf: ComputeBuffer, mask: MaskNode):  # ComputeBuffer
+        super().__init__()
+        self.input = [buf, mask]
+        self.dtype = common.TENSOR_TYPE_TO_NP_TYPE[buf.dtype] if not isinstance(
+            buf.dtype, np.dtype) else buf.dtype
+        self.to_buf = "to"
+
+    @property
+    def op_type(self):
+        return "MaskStoreNode"
+
+
 class StoreNode(IRNode):
     def __init__(self, buf: ComputeBuffer):  # ComputeBuffer
         super().__init__()
@@ -402,10 +459,6 @@ class StoreNode(IRNode):
 class InterGroupStrategy(object):
     def __init__(self):
         self.count = 0
-
-    def get_unique_var_name(self, prefix):
-        self.count += 1
-        return prefix + str(self.count)
 
     def can_fusion(self, node1, node2):
         if node1.op_type in node_sets.ElementWiseNodeSet():

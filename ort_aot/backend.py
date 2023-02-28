@@ -1,8 +1,8 @@
 import common
 import ir as Igniter_IR
 from logger import logger
-import cpu
-import triton
+import codegen_cpu
+import codegen_triton
 import lowering
 
 from typing import Union, List, Tuple, Dict, Set
@@ -42,118 +42,12 @@ int {self.func_name}() {{
             return self.func_handle()
 
         with tempfile.NamedTemporaryFile() as lib_path:
-            self.compiler_func(self.code_gen(), lib_path.name)
+            self.compiler_func(self.code_gen(), lib_path.name, ovewrite_debug=False)
             import ctypes
             so = ctypes.CDLL(str(lib_path.name))
             self.func_handle = getattr(so, self.func_name)
             self.func_handle.restype = ctypes.c_int
             return self.func_handle()
-
-
-class MainFunctionForDebug(Igniter_IR.IRNode):
-    def __init__(self, function:Igniter_IR.FunctionNode):
-        self.body = None
-        self.func_name = function.name
-        self.in_arg_type_shape = function.input
-        self.out_arg_type_shape = function.output
-
-    def code_gen(self, visitor: common.NodeVisitor, var_context: common.CodeGenContext, indent: int = 0):
-        input_dtypes = [i.dtype for i in self.in_arg_type_shape]
-        input_ctype = [common.NP_TYPE_C_TYPE[i.type] for i in input_dtypes]
-        input_shapes = [i.shape.copy() for i in self.in_arg_type_shape]
-        output_shapes = [i.shape.copy() for i in self.out_arg_type_shape]
-        
-        in_dynamic_shape_axis = [
-            [idx for idx, i in enumerate(in_shape) if not i.is_number]
-            for in_shape in input_shapes
-        ]
-        out_dynamic_shape_axis = [
-            [idx for idx, i in enumerate(out_shape) if not i.is_number]
-            for out_shape in output_shapes
-        ]
-        for input_shape, in_dy_axis in zip(input_shapes, in_dynamic_shape_axis):
-            if input_shape == []:
-                input_shape.append(1)
-                continue
-            for dy in in_dy_axis:
-                input_shape[dy] = 24
-            if 0 in in_dy_axis:
-                input_shape[0] = 1
-
-        for output_shape, out_dy_axis in zip(output_shapes, out_dynamic_shape_axis):
-            for dy in out_dy_axis:
-                output_shape[dy] = 24
-            if 0 in out_dy_axis:
-                output_shape[0] = 1
-        input_shapes = [tuple(input_shape) for input_shape in input_shapes]
-        import numpy as np
-        numel_inputs = [np.prod(i) for i in input_shapes]
-        numel_outputs = [np.prod(i) for i in output_shapes]
-        
-        max_dim = max([len(iv) for iv in in_dynamic_shape_axis])
-        max_elem = max([np.prod(iv) for iv in input_shapes])
-        idx = [ind for ind, iax in enumerate(
-            in_dynamic_shape_axis) if len(iax) == (max_dim) and np.prod(input_shapes[ind]) == max_elem][0]
-
-        in_dy_axis = in_dynamic_shape_axis[idx]
-        input_shape = input_shapes[idx]
-        
-
-        code = f"""
-#include <cassert>
-int main(int argc, const char* argv[]) {{
-    int n =0;
-"""
-        buf_read = []
-        r_vars = [f'input{i}' for i in range(len(input_shapes))]
-        for i in range(len(input_shapes)):
-            buf_read.append(
-                f"""
-    FILE *fp{i}=fopen("a{i}.bin","rb");
-    auto* input{i} = new {input_ctype[i]}[{numel_inputs[i]}];
-    n = fread(input{i}, sizeof({input_ctype[i]}), {numel_inputs[i]}, fp{i});
-    assert(n=={numel_inputs[i]});
-    fclose(fp{i});
-                """
-            )
-        buf_write = []
-        w_vars =[f'output{i}' for i in range(len(output_shapes))]
-        for i in range(len(output_shapes)):
-            buf_write.append(
-                f"""
-    auto* output{i} = new float[{numel_outputs[i]}];
-                """
-            )
-        code += "\n".join(buf_read)
-        code += "\n".join(buf_write)
-        code += f"""    
-    const void* input_ptr[] = {{{', '.join(r_vars)}}};
-    void* output_ptr[] = {{{', '.join(w_vars)}}};
-    const int64_t shape_ptr[] = {{{input_shape[in_dy_axis[0]]},{input_shape[in_dy_axis[1]]}}};
-    {self.func_name}(input_ptr, 0, {input_shape[0]*input_shape[1]},  shape_ptr,output_ptr);
-    return 0;
-}}  
-        """
-        return code
-
-
-class CPPCodeGen(object):
-    def __init__(self):
-        pass
-
-    def gen_cpp_code(self, module: Igniter_IR.ModuleNode):
-        # generate function header
-
-        code = ""
-        if isinstance(module.body[-1], MainFunctionForDebug):
-            code = "#include <cstdio>\n#include <cstdlib>\n"
-        code_section = []
-        visitor = cpu.CPUCodeGen()
-        code_section.append(module.code_gen(visitor, {}))
-
-        code += "\n\n".join(code_section)
-
-        return code
 
 
 class CppBackend(object):
@@ -165,8 +59,9 @@ class CppBackend(object):
 
     def init_context(self):
         get_vec_line = GetVecLine(self.compile_to_so).get_vec_line
-        return  common.HardwareContext(
-            self.target, get_vec_line() if self.target=="x86_64" else 4)
+        vec_lanes = get_vec_line() if self.target=="x86_64" else 4
+        vec_lanes = 1024 if self.target=="triton" else vec_lanes
+        return  common.HardwareContext(self.target, vec_lanes)
 
 
     def get_simd_intrinsics(self):
@@ -181,10 +76,16 @@ class CppBackend(object):
             simd_flag += " -mfma "
         return simd_flag
 
-    def compile_to_so(self, code: str, overwrite_lib_path:str=None):
+    def compile_to_so(self, code: str, overwrite_lib_path:str=None, ovewrite_debug=None):
         lib_path = overwrite_lib_path or self.lib_path
         target = self.target
-        debug_mode = self.debug_mode
+        debug_mode = self.debug_mode if ovewrite_debug is None else ovewrite_debug
+
+        if target == "triton":
+            py_lib_path = lib_path.with_suffix(".py")
+            with open(py_lib_path,'w') as fp:
+                fp.write(code)
+            return
 
         INC_FLAG = Path(".").resolve(strict=True) / "thirdparty/MIPP/install/include/"
         vec_flag = self.get_simd_intrinsics()
@@ -260,18 +161,23 @@ class CppBackend(object):
         debug_mode = self.debug_mode
         function_recipes = []
         module = Igniter_IR.ModuleNode(models_with_name)
-        graph_lower = lowering.GraphLowering()
+        graph_lower = lowering.GraphLowering(self.target)
         module.lower(graph_lower, self.context)
+        codegen_mod = codegen_cpu if self.target == "x86_64" else codegen_triton
         if debug_mode:
             # build a test with main function
             module.body.append(
-                MainFunctionForDebug(module.body[-1])
+                codegen_mod.MainFunctionForDebug(module.body[-1])
             )
+        source_file_name = Path("gencode.cc")
+        if self.target == "x86_64":
+            visitor = codegen_mod.CPUCodeGen()
+        else:
+            visitor = codegen_mod.GPUCodeGen()
+            source_file_name=source_file_name.with_suffix('').with_suffix('.py')
+        src_code =module.code_gen(visitor, {})
 
-        codegen = CPPCodeGen()
-        src_code = codegen.gen_cpp_code(module=module)
-
-        with open("code.cc", "w") as f:
+        with open(source_file_name, "w") as f:
             f.write(src_code)
 
         self.compile_to_so(src_code)

@@ -36,14 +36,10 @@ class CPUCodeGen(common.NodeVisitor):
                 else:
                     assert False, "unsupported reduction type: %s" % node.reduction_var[str_var]
 
-                dec_header += need_indent + \
-                    f"float {var_map[str_var]} = {init_val}f;\n"
+                dec_header += need_indent + f"float {var_map[str_var]} = {init_val}f;\n"
                 if node.vectorization:
                     dtype = _get_type(buffer.dtype)
-                    dec_header += (
-                        need_indent
-                        + f"mipp::Reg<{dtype}> vec_{var_map[str_var]} = 0.0f;\n"
-                    )
+                    dec_header += (need_indent + f"mipp::Reg<{dtype}> vec_{var_map[str_var]} = 0.0f;\n")
                     vec_var_set.add(var_map[str_var])
                     node.var_need_post_process[str_var] = f"vec_{var_map[str_var]}"
             else:
@@ -62,20 +58,12 @@ class CPUCodeGen(common.NodeVisitor):
         src += need_indent
         if node.parallel:
             p_var = f"{node.var}"
-            p_var += (
-                f"_{node.parallel_nest_loop.var}" if node.parallel_nest_loop else ""
-            )
+            p_var += (f"_{node.parallel_nest_loop.var}" if node.parallel_nest_loop else "")
             src += f"for (int {p_var}={common.SpecialVar().parallel_loop_start}; {p_var}<{common.SpecialVar().parallel_loop_end}; {p_var}+={node.step}){{\n"
             if node.parallel_nest_loop:
-                src += (
-                    need_indent+need_indent
-                    + f"auto {node.var} = {p_var}/{node.parallel_nest_loop.end};\n"
-                )
+                src += (need_indent+need_indent+ f"auto {node.var} = {p_var}/{node.parallel_nest_loop.end};\n")
                 nest_var = node.parallel_nest_loop.var
-                src += (
-                    need_indent+need_indent
-                    + f"auto {nest_var} = {p_var}%{node.parallel_nest_loop.end};\n"
-                )
+                src += (need_indent+need_indent+ f"auto {nest_var} = {p_var}%{node.parallel_nest_loop.end};\n")
         else:
             # if node.depth == 0 and node.start == 0:
             #    if not node.end.is_Number:
@@ -108,13 +96,9 @@ class CPUCodeGen(common.NodeVisitor):
             vec_func = node.op_map[node.global_connections[s_var].producers[0].op_type]
             w_var = var_map[s_var]
             if vec_func == "hadd":
-                src += need_indent + \
-                    f"{w_var} = {w_var} + mipp::{vec_func}({v_var});\n"
+                src += need_indent + f"{w_var} = {w_var} + mipp::{vec_func}({v_var});\n"
             elif vec_func == "hmax":
-                src += (
-                    need_indent
-                    + f"{w_var} = std::max({w_var} , mipp::{vec_func}({v_var}));\n"
-                )
+                src += (need_indent + f"{w_var} = std::max({w_var} , mipp::{vec_func}({v_var}));\n")
             else:
                 raise NotImplementedError(f"not support {vec_func} yet")
             src += need_indent + f"{v_var} = {w_var};\n"
@@ -128,9 +112,7 @@ class CPUCodeGen(common.NodeVisitor):
 
         # in_param = [f"const float* e_{var_map[i.name]}" for i in node.input]
 
-        in_param = [
-            f"const void** {common.SpecialVar().input_args}",
-        ]
+        in_param = [f"const void** {common.SpecialVar().input_args}",]
         if node.body[0].body.parallel:
             in_param += [
                 f" ptrdiff_t  {common.SpecialVar().parallel_loop_start}, ptrdiff_t {common.SpecialVar().parallel_loop_end}"
@@ -434,11 +416,7 @@ extern "C"{
             assert isinstance(v, (np.ndarray))
             if node.vectorization:
                 vec_var_map.add(named_var)
-                return (
-                    code
-                    + space_indent
-                    + f"mipp::Reg<float> vec_{named_var} = {v[0]}f;\n"
-                )
+                return (code+ space_indent+ f"mipp::Reg<float> vec_{named_var} = {v[0]}f;\n")
             else:
                 return code + space_indent + f"auto {named_var} = {v[0]}f;\n"
 
@@ -520,3 +498,90 @@ extern "C"{
         src += dec_for_sub_loop
         src += node.body.code_gen(self,var_context, indent)
         return src
+
+
+class MainFunctionForDebug(IRNode):
+    def __init__(self, function:FunctionNode):
+        self.body = None
+        self.func_name = function.name
+        self.in_arg_type_shape = function.input
+        self.out_arg_type_shape = function.output
+
+    def code_gen(self, visitor: common.NodeVisitor, var_context: common.CodeGenContext, indent: int = 0):
+        input_dtypes = [i.dtype for i in self.in_arg_type_shape]
+        input_ctype = [common.NP_TYPE_C_TYPE[i.type] for i in input_dtypes]
+        input_shapes = [i.shape.copy() for i in self.in_arg_type_shape]
+        output_shapes = [i.shape.copy() for i in self.out_arg_type_shape]
+        
+        in_dynamic_shape_axis = [
+            [idx for idx, i in enumerate(in_shape) if not i.is_number]
+            for in_shape in input_shapes
+        ]
+        out_dynamic_shape_axis = [
+            [idx for idx, i in enumerate(out_shape) if not i.is_number]
+            for out_shape in output_shapes
+        ]
+        for input_shape, in_dy_axis in zip(input_shapes, in_dynamic_shape_axis):
+            if input_shape == []:
+                input_shape.append(1)
+                continue
+            for dy in in_dy_axis:
+                input_shape[dy] = 24
+            if 0 in in_dy_axis:
+                input_shape[0] = 1
+
+        for output_shape, out_dy_axis in zip(output_shapes, out_dynamic_shape_axis):
+            for dy in out_dy_axis:
+                output_shape[dy] = 24
+            if 0 in out_dy_axis:
+                output_shape[0] = 1
+        input_shapes = [tuple(input_shape) for input_shape in input_shapes]
+        import numpy as np
+        numel_inputs = [np.prod(i) for i in input_shapes]
+        numel_outputs = [np.prod(i) for i in output_shapes]
+        
+        max_dim = max([len(iv) for iv in in_dynamic_shape_axis])
+        max_elem = max([np.prod(iv) for iv in input_shapes])
+        idx = [ind for ind, iax in enumerate(
+            in_dynamic_shape_axis) if len(iax) == (max_dim) and np.prod(input_shapes[ind]) == max_elem][0]
+
+        in_dy_axis = in_dynamic_shape_axis[idx]
+        input_shape = input_shapes[idx]
+        
+
+        code = f"""
+#include <cassert>
+int main(int argc, const char* argv[]) {{
+    int n =0;
+"""
+        buf_read = []
+        r_vars = [f'input{i}' for i in range(len(input_shapes))]
+        for i in range(len(input_shapes)):
+            buf_read.append(
+                f"""
+    FILE *fp{i}=fopen("a{i}.bin","rb");
+    auto* input{i} = new {input_ctype[i]}[{numel_inputs[i]}];
+    n = fread(input{i}, sizeof({input_ctype[i]}), {numel_inputs[i]}, fp{i});
+    assert(n=={numel_inputs[i]});
+    fclose(fp{i});
+                """
+            )
+        buf_write = []
+        w_vars =[f'output{i}' for i in range(len(output_shapes))]
+        for i in range(len(output_shapes)):
+            buf_write.append(
+                f"""
+    auto* output{i} = new float[{numel_outputs[i]}];
+                """
+            )
+        code += "\n".join(buf_read)
+        code += "\n".join(buf_write)
+        code += f"""    
+    const void* input_ptr[] = {{{', '.join(r_vars)}}};
+    void* output_ptr[] = {{{', '.join(w_vars)}}};
+    const int64_t shape_ptr[] = {{{input_shape[in_dy_axis[0]]},{input_shape[in_dy_axis[1]]}}};
+    {self.func_name}(input_ptr, 0, {input_shape[0]*input_shape[1]},  shape_ptr,output_ptr);
+    return 0;
+}}  
+        """
+        return code
