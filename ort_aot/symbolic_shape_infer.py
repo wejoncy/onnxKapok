@@ -340,7 +340,7 @@ class SymbolicShapeInference:
                     if self.verbose_ > 0:
                         logger.debug(
                             "dim {} has been merged with value {}".format(
-                                unique_dims[:int_dim] + unique_dims[int_dim + 1 :],
+                                unique_dims[:int_dim] + unique_dims[int_dim + 1:],
                                 unique_dims[int_dim],
                             )
                         )
@@ -1059,7 +1059,7 @@ class SymbolicShapeInference:
 
         num_letter_occurrences = OrderedDict()
         if mid_index != -1:
-            right_equation = equation[mid_index + 2 :]
+            right_equation = equation[mid_index + 2:]
             right_ellipsis_index = right_equation.find(b"...")
             if right_ellipsis_index != -1:
                 for i in range(num_ellipsis_indices):
@@ -1113,7 +1113,7 @@ class SymbolicShapeInference:
             helper.make_tensor_value_info(
                 node.output[0],
                 self.known_vi_[node.input[0]].type.tensor_type.elem_type,
-                data_shape[:axis] + indices_shape + data_shape[axis + 1 :],
+                data_shape[:axis] + indices_shape + data_shape[axis + 1:],
             )
         )
         # for 1D input, do some sympy compute
@@ -1474,7 +1474,7 @@ class SymbolicShapeInference:
                 output_shape = shape[:dim]
                 if keepdim:
                     output_shape += [1]
-                output_shape += shape[dim + 1 :]
+                output_shape += shape[dim + 1:]
 
             output_shape = get_shape_from_sympy_shape(output_shape)
             vi.CopyFrom(
@@ -1992,7 +1992,7 @@ class SymbolicShapeInference:
                 type(input_sympy_data) == np.array and len(input_sympy_data.shape) == 1
             ):
                 self.sympy_data_[node.output[0]] = input_sympy_data[
-                    starts[0] : ends[0] : steps[0]
+                    starts[0]: ends[0]: steps[0]
                 ]
 
     def _infer_SoftmaxCrossEntropyLoss(self, node):
@@ -2028,7 +2028,7 @@ class SymbolicShapeInference:
                     get_shape_from_sympy_shape(
                         input_sympy_shape[:axis]
                         + [split[i_o]]
-                        + input_sympy_shape[axis + 1 :]
+                        + input_sympy_shape[axis + 1:]
                     ),
                 )
             )
