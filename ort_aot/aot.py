@@ -22,7 +22,6 @@ import copy
 import sys
 
 
-
 # target = "x86_64"
 # target = "arm64-v8a"
 def compile_model(
