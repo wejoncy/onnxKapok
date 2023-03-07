@@ -1,5 +1,5 @@
-from ir import *
-import common
+from .ir import *
+from . import common
 
 
 def _get_type(t):

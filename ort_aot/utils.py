@@ -1,10 +1,11 @@
 
-import onnx
-from symbolic_shape_infer import get_shape_from_value_info, get_elem_type_from_type_proto
-from ir import ComputeBuffer
-import sympy_utils
-import common
 
+from .symbolic_shape_infer import get_shape_from_value_info, get_elem_type_from_type_proto
+from .ir import ComputeBuffer
+from . import sympy_utils
+from . import common
+
+import onnx
 import os
 from pathlib import Path
 from typing import List, Union

@@ -1,7 +1,7 @@
 import onnx
 import numpy as np
 
-import utils
+from . import utils
 
 
 def attr_parse(attr, ind=None):

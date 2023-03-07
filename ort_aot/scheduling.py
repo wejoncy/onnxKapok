@@ -1,8 +1,8 @@
-import ir as Igniter_IR
-from logger import logger
-import sympy_utils
-import sympy
+from . import ir as Igniter_IR
+from .logger import logger
+from . import sympy_utils
 
+import sympy
 from typing import Union, List, Tuple, Dict, Set
 from collections import defaultdict, deque, OrderedDict
 import copy

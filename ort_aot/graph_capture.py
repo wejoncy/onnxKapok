@@ -11,12 +11,10 @@ from typing import Union, List, Tuple, Dict
 from pathlib import Path
 import re
 import struct
-import transformers
 
-import common
-import backend
-import node_sets
-from logger import logger
+from . import common
+from . import node_sets
+from .logger import logger
 
 
 def remove_unused_nodes(model: onnx.ModelProto) -> onnx.ModelProto:

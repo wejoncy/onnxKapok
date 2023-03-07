@@ -1,15 +1,14 @@
-import common
-from logger import logger
-from ir import ExecutionBlock, ComputeBuffer
-import ir as Igniter_IR
-import de_compose
-import utils
+from . import common
+from .logger import logger
+from .ir import ExecutionBlock, ComputeBuffer, ReduceNode, ComputeNode
+from . import de_compose
+from . import utils
+from . import node_sets
 
 import onnx
 from typing import Union, List, Tuple, Dict, Set
 from collections import defaultdict, deque, OrderedDict
 import copy
-import node_sets
 import types
 
 
@@ -251,7 +250,7 @@ def lower_Node_to_IRNode(block: ExecutionBlock, graph_io: common.GraphIOBuffer, 
     new_group = []
     for g in group:
         in_b, out_b = translate_in_out_to_ComputeBuffer(g, buffer_cache)
-        ir_node = Igniter_IR.ComputeNode(g.op_type, in_b, out_b, g.name)
+        ir_node = ComputeNode(g.op_type, in_b, out_b, g.name)
         for ib in in_b:
             ib.successor.append(ir_node)
         for ob in out_b:
@@ -263,7 +262,7 @@ def lower_Node_to_IRNode(block: ExecutionBlock, graph_io: common.GraphIOBuffer, 
                 o_buf = out_b[out_b.index(o)]
                 block.forward_var_set[0][o] = out_b
                 # ComputeBuffer(name=o, dtype=g.output_with_shapes[o][0], shape=g.output_with_shapes[o][1])
-            new_group.append(Igniter_IR.ReduceNode(ir_node))
+            new_group.append(ReduceNode(ir_node))
         else:
             new_group.append(ir_node)
     block.fused_groups.append(new_group)

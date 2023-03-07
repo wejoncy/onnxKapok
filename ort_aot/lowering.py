@@ -1,10 +1,10 @@
-import common
-import ir
-import execution_planer
-import node_sets
-import scheduling
-import sympy_utils
-import utils
+from . import common
+from . import ir
+from . import execution_planer
+from . import node_sets
+from . import scheduling
+from . import sympy_utils
+from . import utils
 
 from typing import Union, List, Tuple, Dict, Set
 from collections import defaultdict

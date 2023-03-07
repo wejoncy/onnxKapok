@@ -4,9 +4,10 @@ import onnx
 import copy
 import enum
 import numpy as np
-import symbolic_shape_infer
 from abc import ABCMeta, abstractmethod
-from logger import logger
+
+from .logger import logger
+from . import symbolic_shape_infer
 
 _ENABLE_PARALLEL_COMPILE = False
 

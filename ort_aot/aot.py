@@ -1,28 +1,25 @@
+from .codecache import PyCodeCache
+from . import utils
+from .logger import logger
+from . import graph_capture
+from . import node_sets
+from .backend import CppBackend
+from . import common
 
-import sys
-from pathlib import Path
-sys.path.append(str(Path(__file__).parent.resolve()))
-
-import codecache
-import utils
-from logger import logger
-import graph_capture
-import node_sets
-from backend import CppBackend
-import common
 import onnxruntime as ort
 import onnx
-from onnxsim import simplify
+# from onnxsim import simplify
 
 import time
 import numpy as np
 from collections import deque, OrderedDict
 from queue import PriorityQueue
 from typing import Union, List, Tuple, Dict
-
+from pathlib import Path
 import re
 import copy
 
+import sys
 
 
 
@@ -208,48 +205,6 @@ def run_triton_func(func_name, lib_path, input_arg, shape_arg, output_arg):
     for i in range(len(output_arg)):
         output_arg[i] = output_arg[i].cpu().numpy()
     return c_tc
-
-
-def test_triton_lib(onnx_model_map: dict, lib_path: Path):
-    func_name, onnx_model = list(onnx_model_map.items())[-1]
-    input_shapes, input_dtypes, in_dynamic_shape_axis, output_shapes = shape_infer_for_test(onnx_model_map)
-    max_dim = max([len(iv) for iv in in_dynamic_shape_axis])
-    max_elem = max([np.prod(iv) for iv in input_shapes])
-    target_idx = [ind for ind, iax in enumerate(
-        in_dynamic_shape_axis) if len(iax) == (max_dim) and np.prod(input_shapes[ind]) == max_elem][0]
-
-    in_dy_axis = in_dynamic_shape_axis[target_idx]
-    input_shape = input_shapes[target_idx]
-
-    mod = codecache.PyCodeCache().load(lib_path.read_text())
-    # sys.path.append(str(lib_path.parent))
-    # import importlib
-    # mod = importlib.import_module(name=lib_path.stem)
-    call_func_name = f'call{func_name}'
-    call_func = getattr(mod, call_func_name)
-    input_arg = []
-    for idx, i_input_shape in enumerate(input_shapes):
-        input_arg.append(np.random.rand(*i_input_shape).astype(common.TENSOR_TYPE_TO_NP_TYPE[input_dtypes[idx]]))
-    output_arg = []
-    for output_shape in output_shapes:
-        output_arg.append(np.zeros(shape=output_shape).astype(np.float32))
-    shape_arg = [input_shape[in_dy_axis[0]], input_shape[in_dy_axis[1]]]
-    call_func(tuple(input_arg), (output_arg), tuple(shape_arg))
-
-    session = ort.InferenceSession(
-        onnx_model.SerializeToString(), providers=["CPUExecutionProvider"]
-    )
-
-    ttg_output = [i.cpu().numpy() for i in output_arg]
-    input_feed = {i.name: input_arg[idx] for idx, i in enumerate(session.get_inputs())}
-    ref_out = session.run([i.name for i in session.get_outputs()], input_feed)
-    all_passed = all(
-        [np.allclose(ref_out[i], ttg_output[i], rtol=1e-03, atol=1e-05) for i in range(len(ttg_output))]
-    )
-    if all_passed:
-        logger.info(f"Results are matched, time_cost: py_tc:{py_tc}, c_tc:{c_tc}")
-    else:
-        logger.warning("Results are not matched")
 
 
 def test_lib(onnx_model_map: dict, lib_path: Path):

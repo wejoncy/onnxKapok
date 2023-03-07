@@ -1,19 +1,18 @@
-import common
 import numpy as np
 from abc import ABCMeta, abstractmethod
 from enum import Enum
 from collections import defaultdict, deque, OrderedDict
 from typing import Union, List, Tuple, Dict, Set
-import sympy_utils
 import sympy
 from sympy.codegen.rewriting import create_expand_pow_optimization
 import multiprocessing
 import re
-
 import onnx
 import onnx.numpy_helper
 
-import node_sets
+from . import sympy_utils
+from . import node_sets
+from . import common
 
 
 class ComputeBuffer(object):

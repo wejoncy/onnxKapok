@@ -1,9 +1,11 @@
-import common
-import ir as Igniter_IR
-from logger import logger
-import codegen_cpu
-import codegen_triton
-import lowering
+from . import common
+from . import ir as Igniter_IR
+from .logger import logger
+from . import codegen_cpu
+from . import codegen_triton
+from . import lowering
+from .sympy_utils import *
+from . import utils
 
 from typing import Union, List, Tuple, Dict, Set
 from collections import defaultdict, deque, OrderedDict
@@ -12,8 +14,6 @@ import tempfile
 import os
 from pathlib import Path
 import subprocess
-from sympy_utils import *
-import utils
 import cpufeature
 import multiprocessing
 import shutil
