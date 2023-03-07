@@ -1,3 +1,8 @@
+
+import sys
+from pathlib import Path
+sys.path.append(str(Path(__file__).parent.resolve()))
+
 import codecache
 import utils
 from logger import logger
@@ -14,13 +19,11 @@ import numpy as np
 from collections import deque, OrderedDict
 from queue import PriorityQueue
 from typing import Union, List, Tuple, Dict
-from pathlib import Path
+
 import re
 import copy
 
-import sys
 
-sys.path.append(str(Path(__file__).parent.resolve()))
 
 
 # target = "x86_64"
