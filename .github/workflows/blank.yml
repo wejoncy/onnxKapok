@@ -43,7 +43,7 @@ jobs:
       - name: Check python style
         run: |
           python3 -m pip install autopep8
-          autopep8 --max-line-length=200 -a -r -d --exit-code ./ort_aot || ( echo '::error title=Style issues::Please run \"autopep8 -a -r -i ./ort_aot\"' ; exit 1 )
+          autopep8 --max-line-length=120 -a -r -d --exit-code ./ort_aot || ( echo '::error title=Style issues::Please run \"autopep8 -a -r -i ./ort_aot\"' ; exit 1 )
           
       # Runs a single command using the runners shell
       - name: install python package
