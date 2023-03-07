@@ -38,6 +38,7 @@ def compile_model(
     model_with_name = capturer.run(model_path, graph_lib_path)
     if len(model_with_name) == 0:
         logger.info(f"no subgraph to compile")
+        shutil.copy(model_path, output_path)
         return 0
 
     cpp_backend = CppBackend(lib_path, target)
