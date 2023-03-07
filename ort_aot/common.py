@@ -267,9 +267,9 @@ class OnnxInGraph(object):
                 self.consumed_by[inp].append(node)
 
         for inp in self.graph.input:
-            self.node_name2module["out_"+inp.name] = inp
+            self.node_name2module["out_" + inp.name] = inp
         self.graph_input_names.extend(
-            ["out_"+inp.name for inp in self.graph.input])
+            ["out_" + inp.name for inp in self.graph.input])
 
         for out in self.graph.output:
             self.node_name2module[

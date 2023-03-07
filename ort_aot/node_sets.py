@@ -18,9 +18,9 @@ class ElementWiseNodeSet:
             "Gelu",
             "FastGelu",
             "Relu",
-            #"Equal",
-            #"Not",
-            #"Where",
+            # "Equal",
+            # "Not",
+            # "Where",
         }
     )
 
@@ -59,6 +59,7 @@ class ShapeNodeSet:
     def __contains__(self, optype):
         return optype in self.type_collection
 
+
 class DecomposeNodeSetInternal:
     type_collection = set(
         {
@@ -74,6 +75,8 @@ class DecomposeNodeSetInternal:
         else:
             optype = node_or_optype
         return optype in self.type_collection
+
+
 class ReduceNodeSetInternal:
     type_collection = set(
         {
@@ -104,7 +107,7 @@ class ReduceNodeSetInternal:
     def __contains__(self, node_or_optype):
         try:
             optype = node_or_optype.op_type
-        except:
+        except BaseException:
             optype = node_or_optype
         return optype in self.type_collection
 

@@ -8,7 +8,8 @@ import lowering
 from typing import Union, List, Tuple, Dict, Set
 from collections import defaultdict, deque, OrderedDict
 import copy
-import tempfile, os
+import tempfile
+import os
 from pathlib import Path
 import subprocess
 from sympy_utils import *
@@ -17,8 +18,9 @@ import cpufeature
 import multiprocessing
 import shutil
 
+
 class GetVecLine(object):
-    def __init__(self, compiler_func:callable):
+    def __init__(self, compiler_func: callable):
         super().__init__()
         self.compiler_func = compiler_func
         self.func_name = "get_vec_line"
@@ -36,7 +38,7 @@ int {self.func_name}() {{
 }}
 """
         return code
-    
+
     def get_vec_line(self):
         if self.func_handle:
             return self.func_handle()
@@ -59,10 +61,9 @@ class CppBackend(object):
 
     def init_context(self):
         get_vec_line = GetVecLine(self.compile_to_so).get_vec_line
-        vec_lanes = get_vec_line() if self.target=="x86_64" else 4
-        vec_lanes = 1024 if self.target=="triton" else vec_lanes
-        return  common.HardwareContext(self.target, vec_lanes)
-
+        vec_lanes = get_vec_line() if self.target == "x86_64" else 4
+        vec_lanes = 1024 if self.target == "triton" else vec_lanes
+        return common.HardwareContext(self.target, vec_lanes)
 
     def get_simd_intrinsics(self):
         cpufeat = cpufeature.CPUFeature
@@ -76,14 +77,14 @@ class CppBackend(object):
             simd_flag += " -mfma "
         return simd_flag
 
-    def compile_to_so(self, code: str, overwrite_lib_path:str=None, ovewrite_debug=None):
+    def compile_to_so(self, code: str, overwrite_lib_path: str = None, ovewrite_debug=None):
         lib_path = overwrite_lib_path or self.lib_path
         target = self.target
         debug_mode = self.debug_mode if ovewrite_debug is None else ovewrite_debug
 
         if target == "triton":
             py_lib_path = lib_path.with_suffix(".py")
-            with open(py_lib_path,'w') as fp:
+            with open(py_lib_path, 'w') as fp:
                 fp.write(code)
             return
 
@@ -99,8 +100,7 @@ class CppBackend(object):
         try_ld = "-Wl,--strip-all"
         cxx_flag = f"-std=c++17 -O3 {try_flag}  {try_ld} {vec_flag} -fPIC -I{INC_FLAG}"
 
-
-        cmake_args = ['-DWITH_DEBUG_EXE='+ ("ON" if debug_mode else "OFF")]#, '-G', 'Ninja']
+        cmake_args = ['-DWITH_DEBUG_EXE=' + ("ON" if debug_mode else "OFF")]  # , '-G', 'Ninja']
         cmake_replace_rules = {'{EXTRA_CXX_FLAGS}': '-march=native' if target == "x86_64" else '',
                                '{TPT_DIR}': str(Path(".").resolve(strict=True))}
 
@@ -109,17 +109,17 @@ class CppBackend(object):
         elif target in ["arm64-v8a", "armeabi-v7a"]:
             assert os.getenv('ANDROID_NDK'), "Please set ANDROID_NDK environment variable"
             cmake_args += ['-DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake',
-            f'-DANDROID_ABI={target}',
-            '-DANDROID_NATIVE_API_LEVEL=android-26',
-            '-DANDROID_ARM_NEON=TRUE',
-            '-DCMAKE_BUILD_TYPE=Release']
+                           f'-DANDROID_ABI={target}',
+                           '-DANDROID_NATIVE_API_LEVEL=android-26',
+                           '-DANDROID_ARM_NEON=TRUE',
+                           '-DCMAKE_BUILD_TYPE=Release']
         else:
             raise Exception("not support target archtecure yet")
 
         with tempfile.TemporaryDirectory() as tmpdirname:
             tmp_dir = Path(tmpdirname)
-            cmake_file = tmp_dir/"CMakeLists.txt"
-            code_file = tmp_dir/"code.cc"
+            cmake_file = tmp_dir / "CMakeLists.txt"
+            code_file = tmp_dir / "code.cc"
             build_dir = tmp_dir / "build"
             build_dir.mkdir()
             with open(code_file, "w") as f:
@@ -127,21 +127,21 @@ class CppBackend(object):
             with open(cmake_file, "w") as f:
                 with open(Path(__file__).parent.parent / "template/CMakeLists.txt", "r") as f2:
                     cmake_template = f2.read()
-                    for k,v in cmake_replace_rules.items():
+                    for k, v in cmake_replace_rules.items():
                         cmake_template = cmake_template.replace(k, v)
                     f.write(cmake_template)
 
             with utils.DirContext(build_dir):
-                out_str = subprocess.check_output(f'cmake ..  {" ".join(cmake_args)} ',shell=True).decode("utf-8")
+                out_str = subprocess.check_output(f'cmake ..  {" ".join(cmake_args)} ', shell=True).decode("utf-8")
                 logger.debug(msg=f"cmake output: {out_str}")
                 out_str = subprocess.check_output(f"make", shell=True).decode("utf-8")
                 logger.debug(msg=f"make output: {out_str}")
-                shutil.copyfile(build_dir/"libcode.so", lib_path)
+                shutil.copyfile(build_dir / "libcode.so", lib_path)
                 if debug_mode:
-                    shutil.copyfile(build_dir/"code_exe", lib_path.with_suffix('').with_suffix('.exe'))
+                    shutil.copyfile(build_dir / "code_exe", lib_path.with_suffix('').with_suffix('.exe'))
             return
 
-        #with tempfile.TemporaryDirectory() as tmpdirname:
+        # with tempfile.TemporaryDirectory() as tmpdirname:
         #    code_file = os.path.join(tmpdirname, "code.cpp")
         #    with open(code_file, "w") as f:
         #        f.write(code)
@@ -174,8 +174,8 @@ class CppBackend(object):
             visitor = codegen_mod.CPUCodeGen()
         else:
             visitor = codegen_mod.GPUCodeGen()
-            source_file_name=source_file_name.with_suffix('').with_suffix('.py')
-        src_code =module.code_gen(visitor, {})
+            source_file_name = source_file_name.with_suffix('').with_suffix('.py')
+        src_code = module.code_gen(visitor, {})
 
         with open(source_file_name, "w") as f:
             f.write(src_code)

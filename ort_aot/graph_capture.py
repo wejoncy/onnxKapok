@@ -78,7 +78,8 @@ class CaptureOnnxSubGraph(object):
             self.node_order[node.name] = len(self.node_order) + 1
         return self.graph
 
-    def get_subgraph_input(self, sub_graph: common.IndexSubGraph, input_control: InputControl = InputControl.ExcludeConstant):
+    def get_subgraph_input(self, sub_graph: common.IndexSubGraph,
+                           input_control: InputControl = InputControl.ExcludeConstant):
         type_shape_info = self.in_graph.tensor_type_shape_info
         inputs = []
         if input_control == InputControl.ExcludeConstant:
@@ -305,7 +306,7 @@ class CaptureOnnxSubGraph(object):
             for name in node.input:
                 if (name in self.in_graph.produced_by and name not in assigned_node_by_name
                         and not self.is_constant_input(name)
-                        ):
+                    ):
                     pre_nodes = self.in_graph.produced_by[name]
                     if (pre_nodes[0].op_type != "Constant" and pre_nodes[0].op_type in e_node_set):
                         q_nodes.put((self.node_order[pre_nodes[0].name], pre_nodes[0]))

@@ -13,7 +13,7 @@ class CPUCodeGen(common.NodeVisitor):
 
     def visit(self, node: IRNode, context: common.CodeGenContext, indent: int):
         fn = getattr(self, node.__class__.__name__)
-        assert fn is not None,  "unimplemented node: %s" % node.__class__.__name__
+        assert fn is not None, "unimplemented node: %s" % node.__class__.__name__
         return fn(node, context, indent)
 
     def Loop(self, node: IRNode, var_context: common.CodeGenContext, indent: int):
@@ -62,9 +62,9 @@ class CPUCodeGen(common.NodeVisitor):
             p_var += (f"_{node.parallel_nest_loop.var}" if node.parallel_nest_loop else "")
             src += f"for (int {p_var}={common.SpecialVar().parallel_loop_start}; {p_var}<{common.SpecialVar().parallel_loop_end}; {p_var}+={node.step}){{\n"
             if node.parallel_nest_loop:
-                src += (need_indent+need_indent + f"auto {node.var} = {p_var}/{node.parallel_nest_loop.end};\n")
+                src += (need_indent + need_indent + f"auto {node.var} = {p_var}/{node.parallel_nest_loop.end};\n")
                 nest_var = node.parallel_nest_loop.var
-                src += (need_indent+need_indent + f"auto {nest_var} = {p_var}%{node.parallel_nest_loop.end};\n")
+                src += (need_indent + need_indent + f"auto {nest_var} = {p_var}%{node.parallel_nest_loop.end};\n")
         else:
             # if node.depth == 0 and node.start == 0:
             #    if not node.end.is_Number:
@@ -367,7 +367,7 @@ extern "C"{
         out_dtype = _get_type(node.output[0].dtype)
         try:
             input_1 = var_map[var_map[input_key[1]]]
-        except:
+        except BaseException:
             input_1 = np.array([np.NaN])
             pass
         assert len(input_key) == 1 or (input_1[0] != np.NaN).all()
@@ -569,12 +569,12 @@ int main(int argc, const char* argv[]) {{
             )
         code += "\n".join(buf_read)
         code += "\n".join(buf_write)
-        code += f"""    
+        code += f"""
     const void* input_ptr[] = {{{', '.join(r_vars)}}};
     void* output_ptr[] = {{{', '.join(w_vars)}}};
     const int64_t shape_ptr[] = {{{input_shape[in_dy_axis[0]]},{input_shape[in_dy_axis[1]]}}};
     {self.func_name}(input_ptr, 0, {input_shape[0]*input_shape[1]},  shape_ptr,output_ptr);
     return 0;
-}}  
+}}
         """
         return code

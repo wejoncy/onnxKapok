@@ -33,7 +33,7 @@ class Node(object):
     @property
     def name(self):
         if self.op_type == "PlaceHolder":
-            return 'out_'+self.current_node.name
+            return 'out_' + self.current_node.name
         return self.current_node.name
 
     def __eq__(self, other):
@@ -43,13 +43,13 @@ class Node(object):
             return self.name == other
         try:
             assert self.current_node.HasField("op_type")
-        except:
+        except BaseException:
             return False
 
         return self.current_node.op_type == other.op_type and self.current_node.name == other.name
 
     def __hash__(self):
-        return hash(self.name+self.op_type)
+        return hash(self.name + self.op_type)
 
 
 class ConnectionGraph(object):
@@ -66,7 +66,7 @@ class ConnectionGraph(object):
 
     # God, ORT will produce a weird case: node's name is same as node's output name
     def get_or_create_gnode(self, node, prefix=""):
-        name = prefix+node.name
+        name = prefix + node.name
         if name not in self.node_2_gnode:
             self.node_2_gnode[name] = Node(node)
             if isinstance(node, onnx.NodeProto):
@@ -225,7 +225,7 @@ def translate_in_out_to_ComputeBuffer(node: Node, buffer_cache: dict) -> (List[C
             buffer_cache[inp] = input_buffer[-1]
         else:
             tv = (node.input_constant[node.input_constant.index(inp)].current_node if inp in node.input_constant
-                  else next(filter(lambda x: x.current_node.output[0] == inp,  node.input_constant)).current_node)
+                  else next(filter(lambda x: x.current_node.output[0] == inp, node.input_constant)).current_node)
             data = common.parse_onnx_to_numpyarray(tv)
             buffer = ComputeBuffer(inp, data=data)
             input_buffer.append(buffer)
@@ -384,9 +384,9 @@ class ExecutionPrepare(object):
 
     def create_execution_plan(self, analyze_io: callable):
         for i in self.edge_graph.model.graph.input:
-            self.graph_io_name.add('out_'+i.name)
+            self.graph_io_name.add('out_' + i.name)
         for i in self.edge_graph.model.graph.output:
-            self.graph_io_name.add('out_'+i.name)
+            self.graph_io_name.add('out_' + i.name)
 
         sorted_nodes = self.topological_with_reduce_last()
 

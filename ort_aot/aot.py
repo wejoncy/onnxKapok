@@ -1,3 +1,10 @@
+import codecache
+import utils
+from logger import logger
+import graph_capture
+import node_sets
+from backend import CppBackend
+import common
 import onnxruntime as ort
 import onnx
 from onnxsim import simplify
@@ -14,13 +21,6 @@ import copy
 import sys
 
 sys.path.append(str(Path(__file__).parent.resolve()))
-import common
-from backend import CppBackend
-import node_sets
-import graph_capture
-from logger import logger
-import utils
-import codecache
 
 
 # target = "x86_64"
@@ -31,13 +31,13 @@ def compile_model(
     output_path.unlink(missing_ok=True)
     lib_path.unlink(missing_ok=True)
     capturer = graph_capture.CaptureOnnxSubGraph(ort_optimize_first)
-    graph_lib_path= lib_path
+    graph_lib_path = lib_path
 
     if target != "x86_64":
         graph_lib_path = Path(lib_path.name)
 
     model_with_name = capturer.run(model_path, graph_lib_path)
-    if len(model_with_name) ==0 :
+    if len(model_with_name) == 0:
         logger.info(f"no subgraph to compile")
         return 0
 
@@ -61,20 +61,20 @@ def debug_model(
 ):
     capturer = graph_capture.CaptureOnnxSubGraph(ort_optimize_first)
     model_with_name = capturer.run(model_path, lib_path)
-    if len(model_with_name) ==0 :
+    if len(model_with_name) == 0:
         logger.info(f"no subgraph to compile")
         return 0
     cpp_backend = CppBackend(lib_path, target, debug_mode=True)
     model_with_name_copy = copy.deepcopy(model_with_name)
     cpp_backend.compile(model_with_name)
 
-    # It's only a expedient for triton test and build. We will build it to a lib with c_wrapper. 
+    # It's only a expedient for triton test and build. We will build it to a lib with c_wrapper.
     if target == 'triton':
         test_lib(model_with_name_copy, lib_path.with_suffix('.py'))
     else:
         test_lib(model_with_name_copy, lib_path)
 
-    #for v in model_with_name.values():
+    # for v in model_with_name.values():
     #    capturer.model_proto.graph.output.extend(v.graph.output)
     capturer.model_proto.graph.output.extend([onnx.ValueInfoProto(name="/transformer/h.0/attn/Cast_1_output_0")])
 
@@ -83,6 +83,7 @@ def debug_model(
     opset.domain = "com.microsoft"
     onnx.save(capturer.model_proto, output_path)
     return capturer.fused_node_nums
+
 
 class CostTime(object):
     def __init__(self, tcs: list, repeat: int = 1):
@@ -138,7 +139,7 @@ def shape_infer_for_test(onnx_model_map):
             output_shape[0] = 1
     input_shapes = [tuple(input_shape) for input_shape in input_shapes]
 
-    return input_shapes,input_dtypes,in_dynamic_shape_axis, output_shapes
+    return input_shapes, input_dtypes, in_dynamic_shape_axis, output_shapes
 
 
 def run_x86_c_func(func_name, lib_path, input_arg, shape_arg_tp, output_arg, input_shape_loop):
@@ -159,7 +160,11 @@ def run_x86_c_func(func_name, lib_path, input_arg, shape_arg_tp, output_arg, inp
     elif input_count == 3:
         in_arg = in_arg_type(input_arg[0].ctypes.data, input_arg[1].ctypes.data, input_arg[2].ctypes.data)
     elif input_count == 4:
-        in_arg = in_arg_type(input_arg[0].ctypes.data, input_arg[1].ctypes.data, input_arg[2].ctypes.data, input_arg[3].ctypes.data) 
+        in_arg = in_arg_type(
+            input_arg[0].ctypes.data,
+            input_arg[1].ctypes.data,
+            input_arg[2].ctypes.data,
+            input_arg[3].ctypes.data)
     else:
         in_arg = in_arg_type(input_arg[0].ctypes.data)
 
@@ -185,7 +190,7 @@ def run_x86_c_func(func_name, lib_path, input_arg, shape_arg_tp, output_arg, inp
 
 
 def run_triton_func(func_name, lib_path, input_arg, shape_arg, output_arg):
-    #mod = codecache.PyCodeCache().load(lib_path.read_text())
+    # mod = codecache.PyCodeCache().load(lib_path.read_text())
     sys.path.append(str(lib_path.parent))
     import importlib
     mod = importlib.import_module(name=lib_path.stem)
@@ -201,27 +206,28 @@ def run_triton_func(func_name, lib_path, input_arg, shape_arg, output_arg):
         output_arg[i] = output_arg[i].cpu().numpy()
     return c_tc
 
+
 def test_triton_lib(onnx_model_map: dict, lib_path: Path):
     func_name, onnx_model = list(onnx_model_map.items())[-1]
-    input_shapes,input_dtypes,in_dynamic_shape_axis, output_shapes = shape_infer_for_test(onnx_model_map)
+    input_shapes, input_dtypes, in_dynamic_shape_axis, output_shapes = shape_infer_for_test(onnx_model_map)
     max_dim = max([len(iv) for iv in in_dynamic_shape_axis])
     max_elem = max([np.prod(iv) for iv in input_shapes])
     target_idx = [ind for ind, iax in enumerate(
         in_dynamic_shape_axis) if len(iax) == (max_dim) and np.prod(input_shapes[ind]) == max_elem][0]
-    
+
     in_dy_axis = in_dynamic_shape_axis[target_idx]
     input_shape = input_shapes[target_idx]
 
     mod = codecache.PyCodeCache().load(lib_path.read_text())
-    #sys.path.append(str(lib_path.parent))
-    #import importlib
-    #mod = importlib.import_module(name=lib_path.stem)
+    # sys.path.append(str(lib_path.parent))
+    # import importlib
+    # mod = importlib.import_module(name=lib_path.stem)
     call_func_name = f'call{func_name}'
     call_func = getattr(mod, call_func_name)
     input_arg = []
-    for idx, i_input_shape in enumerate( input_shapes):
+    for idx, i_input_shape in enumerate(input_shapes):
         input_arg.append(np.random.rand(*i_input_shape).astype(common.TENSOR_TYPE_TO_NP_TYPE[input_dtypes[idx]]))
-    output_arg =[ ]
+    output_arg = []
     for output_shape in output_shapes:
         output_arg.append(np.zeros(shape=output_shape).astype(np.float32))
     shape_arg = [input_shape[in_dy_axis[0]], input_shape[in_dy_axis[1]]]
@@ -231,7 +237,7 @@ def test_triton_lib(onnx_model_map: dict, lib_path: Path):
         onnx_model.SerializeToString(), providers=["CPUExecutionProvider"]
     )
 
-    ttg_output = [ i.cpu().numpy() for i in output_arg]
+    ttg_output = [i.cpu().numpy() for i in output_arg]
     input_feed = {i.name: input_arg[idx] for idx, i in enumerate(session.get_inputs())}
     ref_out = session.run([i.name for i in session.get_outputs()], input_feed)
     all_passed = all(
@@ -245,20 +251,20 @@ def test_triton_lib(onnx_model_map: dict, lib_path: Path):
 
 def test_lib(onnx_model_map: dict, lib_path: Path):
     func_name, onnx_model = list(onnx_model_map.items())[-1]
-    input_shapes,input_dtypes,in_dynamic_shape_axis, output_shapes = shape_infer_for_test(onnx_model_map)
+    input_shapes, input_dtypes, in_dynamic_shape_axis, output_shapes = shape_infer_for_test(onnx_model_map)
     max_dim = max([len(iv) for iv in in_dynamic_shape_axis])
     max_elem = max([np.prod(iv) for iv in input_shapes])
     idx = [ind for ind, iax in enumerate(
         in_dynamic_shape_axis) if len(iax) == (max_dim) and np.prod(input_shapes[ind]) == max_elem][0]
-    
+
     in_dy_axis = in_dynamic_shape_axis[idx]
     input_shape_loop = input_shapes[idx]
     shape_arg = [input_shape_loop[in_dy_axis[0]], input_shape_loop[in_dy_axis[1]]]
 
     input_arg = []
-    for idx, input_shape in enumerate( input_shapes):
+    for idx, input_shape in enumerate(input_shapes):
         if input_dtypes[idx] == 9:
-            input_arg.append(np.random.rand(*input_shape).astype(np.float32)>0.5)
+            input_arg.append(np.random.rand(*input_shape).astype(np.float32) > 0.5)
         else:
             input_arg.append(np.random.rand(*input_shape).astype(common.TENSOR_TYPE_TO_NP_TYPE[input_dtypes[idx]]))
 

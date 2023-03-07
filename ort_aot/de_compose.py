@@ -82,7 +82,8 @@ class DecomposeDispatch(object):
         add_out1, add_node1 = self.new_node(
             "Add", [inputs[2], mul_out1], f"{node.name}_add", output=outputs)
 
-        return [e1_12_node, reducemean_node, sub_node, mul_node0, reducemean_node1, add_node, rsqrt_node, mul_node, mul_node1, add_node1]
+        return [e1_12_node, reducemean_node, sub_node, mul_node0,
+                reducemean_node1, add_node, rsqrt_node, mul_node, mul_node1, add_node1]
 
     def Softmax(self, node: onnx.NodeProto, **kwargs):
         axis = node.attribute[0].i

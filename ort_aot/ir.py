@@ -372,7 +372,7 @@ class Indexer:
 
             expand_opt = create_expand_pow_optimization(6)
             res = expand_opt(sympy_utils.sympy_dot(br_index, br_stride))
-            gs = re.findall("([a-zA-Z0-9_]+)\*\*(\d)", str(res))
+            gs = re.findall("([a-zA-Z0-9_]+)\\*\\*(\\d)", str(res))
             assert (gs == [])  # or gs[0][1] == '2', f"TODO fix me when pow {gs[0][1]} or other"
             # res= re.sub('([a-zA-Z0-9_]+)\*\*(\d)','\g<1>*\g<1>',str(res))
             if for_triton:  # gpu

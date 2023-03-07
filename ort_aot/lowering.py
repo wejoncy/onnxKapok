@@ -180,7 +180,7 @@ class GraphLowering(common.NodeVisitor):
 
     def visit(self, node: ir.IRNode, context: common.HardwareContext, indent: int = 0):
         fn = getattr(self, node.__class__.__name__)
-        assert fn is not None,  "unimplemented node: %s" % node.__class__.__name__
+        assert fn is not None, "unimplemented node: %s" % node.__class__.__name__
         return fn(node, context)
 
     def FunctionNode(self, node: ir.FunctionNode, context: common.HardwareContext):

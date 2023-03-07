@@ -48,19 +48,19 @@ class MainFunctionForDebug(IRNode):
 
         need_indent = " " * 4
 
-        shape_define = [need_indent+f"{sp}= {used_shape[idx%2]}\n" for idx, sp in enumerate(self.dynamic_shape)]
+        shape_define = [need_indent + f"{sp}= {used_shape[idx%2]}\n" for idx, sp in enumerate(self.dynamic_shape)]
         shape_define = ''.join(shape_define)
         dynamic_var = [str(vsp) for vsp in self.dynamic_shape]
         dynamic_var = ','.join(dynamic_var)
 
         input_tensors_expr = [
-            need_indent+f"input_{i} = torch.rand({in_shape}, device='cuda')\n" for i, in_shape in enumerate(input_shapes)]
+            need_indent + f"input_{i} = torch.rand({in_shape}, device='cuda')\n" for i, in_shape in enumerate(input_shapes)]
         input_tensors_expr = ''.join(input_tensors_expr)
         input_tensors_var = [f"input_{i}" for i, t in enumerate(self.in_arg_type_shape)]
         input_tensors_var = ','.join(input_tensors_var)
 
         output_tensors_expr = [
-            need_indent+f"output_{i} = torch.empty({out_shape}, device='cuda')\n" for i, out_shape in enumerate(output_shapes)]
+            need_indent + f"output_{i} = torch.empty({out_shape}, device='cuda')\n" for i, out_shape in enumerate(output_shapes)]
         output_tensors_expr = ''.join(output_tensors_expr)
         output_tensors_var = [f"output_{i}" for i, t in enumerate(self.out_arg_type_shape)]
         output_tensors_var = ','.join(output_tensors_var)
@@ -341,7 +341,7 @@ import triton.language as tl
         out_dtype = _get_type(node.output[0].dtype)
         try:
             input_1 = var_map[var_map[input_key[1]]]
-        except:
+        except BaseException:
             input_1 = np.array([np.NaN])
             pass
         assert len(input_key) == 1 or (input_1[0] != np.NaN).all()
@@ -421,7 +421,7 @@ import triton.language as tl
         if input_buf.dtype.type == np.bool_:
             assert False, "bool type not supported"
         else:
-            return code + (space_indent+ f"tl.store(e_{annotated_var}+roffset, {named_var}, {mask_name})\n")
+            return code + (space_indent + f"tl.store(e_{annotated_var}+roffset, {named_var}, {mask_name})\n")
 
     def ExecutionBlock(
         self, node: ExecutionBlock, var_context: common.CodeGenContext, indent: int
