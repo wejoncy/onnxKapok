@@ -105,15 +105,11 @@ def analyze_io(
     outputs = defaultdict(lambda: 0)
     loads = set()
     const_buffer_set = set([i.name for i in global_buffer.const_buffer])
-    external_buffer_out_set = set(
-        [i.name for i in global_buffer.var_buffer_out])
+    external_buffer_out_set = set([i.name for i in global_buffer.var_buffer_out])
 
     def is_const_input(inp):
-        return inp in const_buffer_set or (
-            inp in c_graph.egraph.produced_by
-            and c_graph.egraph.produced_by[inp][0].op_type == "Constant"
-        )
-
+        return inp in const_buffer_set or (inp in c_graph.egraph.produced_by
+                                           and c_graph.egraph.produced_by[inp][0].op_type == "Constant")
     for g in block.group:
         for inp_bf in g.input:
             assert isinstance(inp_bf, ir.ComputeBuffer)
@@ -223,8 +219,7 @@ class GraphLowering(common.NodeVisitor):
             plan = execution_planer.ExecutionPrepare(model, self.target)
             plan.prepare()
             node_group = plan.create_execution_plan(analyze_io)
-            function: FunctionNode = lower_to_functionNode(
-                node_group, plan.external_buffer, func_name, allow_vectorize)
+            function: FunctionNode = lower_to_functionNode(node_group, plan.external_buffer, func_name, allow_vectorize)
             node.body.append(function)
         node.has_vectorization = allow_vectorize
 

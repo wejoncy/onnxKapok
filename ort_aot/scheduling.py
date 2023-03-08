@@ -41,6 +41,7 @@ class Schedule(object):
         loop1.body = self.do_fusion_recursive(inner_loop1, inner_loop2)
         return loop1
 
+    @abstractmethod
     def update_IO_after_fusion_op(
         self, bb1: Igniter_IR.ExecutionBlock, bb2: Igniter_IR.ExecutionBlock,
         global_input: Set[str], global_output: Set[str]
@@ -266,15 +267,55 @@ class GPUSchedule(Schedule):
     def tile_inner_loop(
         self, blocks: List[Igniter_IR.ExecutionBlock], tile_size: int = 16
     ) -> List[Igniter_IR.ExecutionBlock]:
-        # don't need it
-        return blocks
-
-    def vectoring_inner_loop(
-        self, blocks: List[Igniter_IR.ExecutionBlock], lanes: int = 16
-    ) -> List[Igniter_IR.ExecutionBlock]:
         assert (
             len(blocks) == 1
         ), " only support one block now, but got {} blocks".format(len(blocks))
+        bb1: Igniter_IR.ExecutionBlock = blocks[0]
+        if not isinstance(bb1.body, Igniter_IR.Loop):
+            return blocks
+        sympy_factor = sympy_utils.sympy_symbol(tile_size)
+
+        def do_tile_loop(loop: Igniter_IR.Loop):
+            if loop.depth > 1:
+                if isinstance(loop.body, list):
+                    loop.body = [do_tile_loop(i) for i in loop.body]
+                loop.body = do_tile_loop(loop.body)
+                return loop
+
+            list_loop = loop.body if isinstance(loop.body, list) else [loop.body]
+            if len(list_loop) == 1:
+                return loop
+            mutate_body = []
+            for sub_body in list_loop:
+                if not isinstance(sub_body, Igniter_IR.Loop):
+                    mutate_body.append(sub_body)
+                    continue
+                assert sub_body.depth == 0, "only support tile loop with depth 0"
+
+                main_loop: Igniter_IR.Loop = sub_body
+                mutate_body.append(main_loop)
+                mutate_body.append(Igniter_IR.PostProcessBlock(main_loop))
+                mutate_body[-1].global_connections = bb1.connections
+            loop.body = mutate_body
+            return loop
+
+        blocks[0].body = do_tile_loop(bb1.body)
+        return blocks
+
+    def update_IO_after_fusion_op(
+        self, bb1: Igniter_IR.ExecutionBlock, bb2: Igniter_IR.ExecutionBlock,
+        global_input: Set[str], global_output: Set[str]
+    ):
+        super().update_IO_after_fusion_op(bb1, bb2, global_input, global_output)
+        # for k,v in bb1.forward_var_set[0].items():
+        #    if 'out_'+k not in global_input and 'out_'+k not in global_output:
+        #        v.attributes.add(Igniter_IR.BufferAttr.ACROSS_SHARED)
+        return
+
+    def vectoring_inner_loop(
+        self, blocks: List[Igniter_IR.ExecutionBlock], lanes: int = 1024
+    ) -> List[Igniter_IR.ExecutionBlock]:
+        assert (len(blocks) == 1), " only support one block now, but got {} blocks".format(len(blocks))
         bb1: Igniter_IR.ExecutionBlock = blocks[0]
         if not isinstance(bb1.body, Igniter_IR.Loop):
             return blocks
@@ -296,16 +337,12 @@ class GPUSchedule(Schedule):
                 or loop.parallel
             ):
                 loop.attributes = Igniter_IR.LoopAttr.ScalarLoop
-                assert (
-                    loop.body[0].vectorization == False
-                ), "op in this loop should not be vectorized"
+                assert (loop.body[0].vectorization == False), "op in this loop should not be vectorized"
                 return loop
             loop.vectorization = True
-            loop.step = loop.end
+            loop.step = loop.end  # sympy_utils.sympy_symbol(name="RBLOCK")
             for op in loop.body:
-                assert isinstance(
-                    op, Igniter_IR.IRNode
-                ), f"expected op to be IRNode, but got {type(op)}"
+                assert isinstance(op, Igniter_IR.IRNode), f"expected op to be IRNode, but got {type(op)}"
                 op.vectorization = True
             return loop
 
@@ -319,14 +356,11 @@ class GPUSchedule(Schedule):
             len(blocks) == 1
         ), " only support one block now, but got {} blocks".format(len(blocks))
         bb = blocks[0]
-        assert isinstance(
-            bb.body, Igniter_IR.Loop), "only support parallelize outer loop"
+        assert isinstance(bb.body, Igniter_IR.Loop), "only support parallelize outer loop"
         parallel_depth = bb.body.depth
         if parallel_depth < 1:
             return blocks
-        assert (
-            bb.body.start == 0 and bb.body.step == 1
-        ), "only support parallelize natural nest loop"
+        assert (bb.body.start == 0 and bb.body.step == 1), "only support parallelize natural nest loop"
 
         bb.body.parallel = True
 
@@ -334,12 +368,9 @@ class GPUSchedule(Schedule):
             this_loop: Igniter_IR.Loop = bb.body
             nest_loops = []
             while this_loop.depth > 1:
-                assert isinstance(
-                    this_loop.body, Igniter_IR.Loop
-                ), "only support parallelize outer loop"
-                assert (
-                    this_loop.body.start == 0 and this_loop.body.step == 1
-                ), "only support parallelize natural nest loop"
+                assert isinstance(this_loop.body, Igniter_IR.Loop), "only support parallelize outer loop"
+                assert (this_loop.body.start == 0 and this_loop.body.step ==
+                        1), "only support parallelize natural nest loop"
                 nest_loops.append(this_loop.body)
                 this_loop = this_loop.body
 
@@ -349,8 +380,6 @@ class GPUSchedule(Schedule):
         elif parallel_depth == 1:
             pass
         else:
-            raise NotImplementedError(
-                "only support parallelize outer loop with depth 1"
-            )
+            raise NotImplementedError("only support parallelize outer loop with depth 1")
 
         return blocks

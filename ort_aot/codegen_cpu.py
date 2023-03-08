@@ -16,7 +16,7 @@ class CPUCodeGen(common.NodeVisitor):
         assert fn is not None, "unimplemented node: %s" % node.__class__.__name__
         return fn(node, context, indent)
 
-    def Loop(self, node: IRNode, var_context: common.CodeGenContext, indent: int):
+    def Loop(self, node: Loop, var_context: common.CodeGenContext, indent: int):
         var_map = var_context.var_map
         vec_var_set = var_context.vectorized_var_set
         need_indent = " " * indent
@@ -473,10 +473,8 @@ extern "C"{
         if node.forward_var_set:
             for fvs in node.forward_var_set:
                 for str_var, buffer_l in tuple(fvs.items()):
-                    assert len(buffer_l) == 1 if isinstance(
-                        buffer_l, list) else True
-                    buffer = buffer_l[0] if isinstance(
-                        buffer_l, list) else buffer_l
+                    assert len(buffer_l) == 1 if isinstance(buffer_l, list) else True
+                    buffer = buffer_l[0] if isinstance(buffer_l, list) else buffer_l
                     if buffer.shape[-1] == 1:
                         continue
                     if str_var in var_declared:

@@ -362,8 +362,8 @@ class CaptureOnnxSubGraph(object):
         for idx, sub_graph in enumerate(sub_graph_list):
             if 'Softmax' not in [i.op_type for i in sub_graph.sub_graph_nodes]:
                 continue
-            # if len(sub_graph.sub_graph_nodes) < 6:
-            #    continue
+            #if len(sub_graph.sub_graph_nodes) < 6:
+            #   continue
             # if idx != 1:continue
 
             sub_model = self.create_model_with_sub_graph(sub_graph)

@@ -1,6 +1,6 @@
 import numpy as np
 from abc import ABCMeta, abstractmethod
-from enum import Enum
+from enum import Enum, auto
 from collections import defaultdict, deque, OrderedDict
 from typing import Union, List, Tuple, Dict, Set
 import sympy
@@ -15,6 +15,9 @@ from . import node_sets
 from . import common
 
 
+class BufferAttr(Enum):
+    GLOBAL = auto()
+    ACROSS_SHARED = auto()
 class ComputeBuffer(object):
     def __init__(
         self, name: str, dtype: np.dtype = np.dtype(object), shape: list = None, data: np.ndarray = None
@@ -27,6 +30,7 @@ class ComputeBuffer(object):
         self.loop_index: List[sympy.Expr] = None
         self.predecessor: IRNode = None
         self.successor: List[IRNode] = []
+        self.attributes: Set[BufferAttr] = set()
         self.attr_cross_loop = False
 
     def handle_data(self, data):
@@ -335,6 +339,7 @@ class ReduceNode(ComputeNode):
         self.body: ComputeNode = body
         self.input = body.input
         self.output = body.output
+        self.is_final = False
 
 
 class Indexer:

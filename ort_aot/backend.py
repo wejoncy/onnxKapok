@@ -166,9 +166,7 @@ class CppBackend(object):
         codegen_mod = codegen_cpu if self.target == "x86_64" else codegen_triton
         if debug_mode:
             # build a test with main function
-            module.body.append(
-                codegen_mod.MainFunctionForDebug(module.body[-1])
-            )
+            module.body.append(codegen_mod.MainFunctionForDebug(module.body[-1]))
         source_file_name = Path("gencode.cc")
         if self.target == "x86_64":
             visitor = codegen_mod.CPUCodeGen()

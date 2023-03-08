@@ -260,8 +260,7 @@ def lower_Node_to_IRNode(block: ExecutionBlock, graph_io: common.GraphIOBuffer, 
             block.has_reduce = True
             for o in node.output:
                 o_buf = out_b[out_b.index(o)]
-                block.forward_var_set[0][o] = out_b
-                # ComputeBuffer(name=o, dtype=g.output_with_shapes[o][0], shape=g.output_with_shapes[o][1])
+                block.forward_var_set[0][o] = o_buf
             new_group.append(ReduceNode(ir_node))
         else:
             new_group.append(ir_node)
