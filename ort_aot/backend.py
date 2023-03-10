@@ -7,6 +7,7 @@ from . import lowering
 from .sympy_utils import *
 from . import utils
 
+
 from typing import Union, List, Tuple, Dict, Set
 from collections import defaultdict, deque, OrderedDict
 import copy
@@ -52,7 +53,7 @@ int {self.func_name}() {{
             return self.func_handle()
 
 
-class CppBackend(object):
+class Backend(object):
     def __init__(self, lib_path: Path, target: str, debug_mode=False):
         self.lib_path = lib_path
         self.target = target
@@ -62,7 +63,7 @@ class CppBackend(object):
     def init_context(self):
         get_vec_line = GetVecLine(self.compile_to_so).get_vec_line
         vec_lanes = get_vec_line() if self.target == "x86_64" else 4
-        vec_lanes = 1024 if self.target == "triton" else vec_lanes
+        vec_lanes = 1024 if "triton" in self.target else vec_lanes
         return common.HardwareContext(self.target, vec_lanes)
 
     def get_simd_intrinsics(self):
@@ -82,7 +83,7 @@ class CppBackend(object):
         target = self.target
         debug_mode = self.debug_mode if ovewrite_debug is None else ovewrite_debug
 
-        if target == "triton":
+        if "triton" in target:
             py_lib_path = lib_path.with_suffix(".py")
             with open(py_lib_path, 'w') as fp:
                 fp.write(code)
@@ -141,30 +142,14 @@ class CppBackend(object):
                     shutil.copyfile(build_dir / "code_exe", lib_path.with_suffix('').with_suffix('.exe'))
             return
 
-        # with tempfile.TemporaryDirectory() as tmpdirname:
-        #    code_file = os.path.join(tmpdirname, "code.cpp")
-        #    with open(code_file, "w") as f:
-        #        f.write(code)
-        #    o_file = os.path.join(tmpdirname, "code.o")
-        #    cmd = f"g++ {cxx_flag} -c {code_file}  -o {o_file}"
-        #    out_str = subprocess.check_output(cmd, shell=True).decode("utf-8")
-        #    cmd = f"g++ -shared  {cxx_flag}  {o_file} -o {lib_path}  "
-        #    out_str = subprocess.check_output(cmd, shell=True).decode("utf-8")
-#
-        #    if debug_mode:
-        #        cmd = f"{CXX} -g {code_file} -I{INC_FLAG} -o {lib_path}.exe"
-        #        out_str = subprocess.check_output(cmd, shell=True).decode("utf-8")
-        #    assert lib_path.exists(), "compile failed"
-
     def compile(self, models_with_name: dict):
         logger.info("vec_line  = " + str(self.context.vec_lanes))
-        debug_mode = self.debug_mode
-        function_recipes = []
+
         module = Igniter_IR.ModuleNode(models_with_name)
         graph_lower = lowering.GraphLowering(self.target)
         module.lower(graph_lower, self.context)
         codegen_mod = codegen_cpu if self.target == "x86_64" else codegen_triton
-        if debug_mode:
+        if self.debug_mode:
             # build a test with main function
             module.body.append(codegen_mod.MainFunctionForDebug(module.body[-1]))
         source_file_name = Path("gencode.cc")

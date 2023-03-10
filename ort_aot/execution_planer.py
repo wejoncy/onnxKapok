@@ -283,7 +283,7 @@ class InterGroupStrategy(object):
         return [nodes]
 
     def do_fusion(self, nodes):
-        if self.target == "triton":
+        if "triton" in self.target:
             return self.do_fusion_for_triton(nodes)
         before_fusion_groups = deque()
         after_fusion_groups = deque()

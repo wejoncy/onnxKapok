@@ -33,7 +33,7 @@ class UniqueNameGenerator(object):
 
 
 def create_load_or_store(buf: ir.ComputeBuffer, is_load: bool, target: str):
-    if target != "triton":
+    if "triton" not in target:
         if is_load:
             return [ir.LoadNode(buf)]
         else:
@@ -185,7 +185,7 @@ class GraphLowering(common.NodeVisitor):
         node.shape_var = list(set(shape_var))
         node.shape_var.sort(key=shape_var.index)
 
-        node.body[0].gen_var(node.const_var, self.target == "triton")
+        node.body[0].gen_var(node.const_var, "triton" in self.target)
         node.body[0].analyze_io_connections()
 
     def ModuleNode(self, node: ir.ModuleNode, context: common.HardwareContext):
@@ -197,14 +197,14 @@ class GraphLowering(common.NodeVisitor):
                                   allow_vectorize: bool):
             for block in blocks:
                 block.lower(self, context)
-            if self.target == 'triton':
+            if "triton" in self.target:
                 schedule = scheduling.GPUSchedule()
             else:
                 schedule = scheduling.Schedule()
             blocks = schedule.fusion_op(blocks, set(i.name for i in global_buffer.var_buffer_in),
                                         set(i.name for i in global_buffer.var_buffer_out))
             blocks = schedule.tile_inner_loop(blocks, context.vec_lanes)
-            if allow_vectorize or self.target == 'triton':
+            if allow_vectorize or "triton" in self.target:
                 blocks = schedule.vectoring_inner_loop(blocks, context.vec_lanes)
             blocks = schedule.parallelize_outer_loop(blocks)
             func = ir.FunctionNode(global_buffer.var_buffer_in, global_buffer.var_buffer_out)
@@ -220,6 +220,7 @@ class GraphLowering(common.NodeVisitor):
             plan.prepare()
             node_group = plan.create_execution_plan(analyze_io)
             function: FunctionNode = lower_to_functionNode(node_group, plan.external_buffer, func_name, allow_vectorize)
+            function.target = self.target
             node.body.append(function)
         node.has_vectorization = allow_vectorize
 

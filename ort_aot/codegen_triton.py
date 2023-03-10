@@ -52,6 +52,8 @@ class MainFunctionForDebug(IRNode):
         shape_define = ''.join(shape_define)
         dynamic_var = [str(vsp) for vsp in self.dynamic_shape]
         dynamic_var = ','.join(dynamic_var)
+        if dynamic_var:
+            dynamic_var += ","
 
         input_tensors_expr = [
             need_indent + f"input_{i} = torch.rand({in_shape}, device='cuda')\n" for i, in_shape in enumerate(input_shapes)]
@@ -78,7 +80,7 @@ if __name__ == "__main__":
     n_elements_in_last_dim = output_0.shape[-1]
     paralleled_blocks = output_0.numel()//n_elements_in_last_dim
     grid = lambda meta: (paralleled_blocks* triton.cdiv(n_elements_in_last_dim, meta['RBLOCK']),)
-    {self.func_name}[grid]({input_tensors_var}, {output_tensors_var}, {dynamic_var}, RBLOCK=triton.next_power_of_2(n_elements_in_last_dim))
+    {self.func_name}[grid]({input_tensors_var}, {output_tensors_var}, {dynamic_var} RBLOCK=triton.next_power_of_2(n_elements_in_last_dim))
     print(output_0[0,0,0,:10])
     """
         return src
@@ -192,7 +194,7 @@ class GPUCodeGen(common.NodeVisitor):
         return src
 
     def FunctionNode(
-        self, node: IRNode, var_context: common.CodeGenContext, indent: int
+        self, node: FunctionNode, var_context: common.CodeGenContext, indent: int
     ):
         if not var_context:
             var_map = node.body[0].var_map
@@ -205,8 +207,10 @@ class GPUCodeGen(common.NodeVisitor):
 
         dynamic_shape_arg = [f"{sp}" for sp in node.shape_var]
         dynamic_shape_arg = ", ".join(dynamic_shape_arg)
+        if dynamic_shape_arg:
+            dynamic_shape_arg += ", "
 
-        func_signature = f"def {node.name}({func_input_arg}, {func_output_arg}, {dynamic_shape_arg}, RBLOCK : tl.constexpr):\n"
+        func_signature = f"def {node.name}({func_input_arg}, {func_output_arg}, {dynamic_shape_arg} RBLOCK : tl.constexpr):\n"
 
         code = ""
         code += func_signature
@@ -219,7 +223,8 @@ class GPUCodeGen(common.NodeVisitor):
         code += node.body[0].code_gen(self, None, indent)
 
         # we need a wrapper to call the jit function
-        code += f'''
+        if node.target != "triton_ort_training":
+            code += f'''
 
 def call{node.name}(*args):
     inputs_, outputs, shape = args
@@ -235,12 +240,50 @@ def call{node.name}(*args):
     {node.name}[grid](*inputs, *outputs, *shape, RBLOCK=triton.next_power_of_2(n_elements_in_last_dim))
 
 '''
+        else:
+        # when generate code for triton_ort_training. we are running in JIT mode, so all the shapes are known
+            import torch
+            final_shape = list(node.output[0].shape)
+            torch_dtype = torch.from_numpy(np.zeros(1, dtype=node.output[0].dtype)).dtype
+            for out in node.output:
+                assert len(out.shape) == len(final_shape), "output shape dim not match"
+                for idx, v in enumerate(final_shape):
+                    final_shape[idx] = max(v,out.shape[idx])
+            n_elements_in_last_dim = final_shape[-1]
+
+            # allocate output tensor
+            alloc_output_tensor_code = ""
+            for idx, out in enumerate(node.output):
+                alloc_output_tensor_code += f"    outputs.append(torch.zeros({tuple(out.shape)}, dtype={torch_dtype}, device=inputs[0].device))\n"
+
+            code += f'''
+
+def call{node.name}(inputs_):
+    inputs=[]
+    for inp in inputs_:
+        inputs.append(_from_dlpack(inp))
+
+    outputs=[]
+{alloc_output_tensor_code}
+
+    n_elements_in_last_dim = {n_elements_in_last_dim}
+    paralleled_blocks = {np.prod(final_shape)//n_elements_in_last_dim}
+
+    grid = lambda meta: (paralleled_blocks* triton.cdiv(n_elements_in_last_dim, meta['RBLOCK']),)
+    {node.name}[grid](*inputs, *outputs, RBLOCK=triton.next_power_of_2(n_elements_in_last_dim))
+    for idx, out in enumerate(outputs):
+        outputs[idx] = to_dlpack(out)
+    return outputs
+'''
         return code
 
     def ModuleNode(self, node: IRNode, var_context: common.CodeGenContext, indent: int):
         code = """
 import triton
 import triton.language as tl
+import torch
+from torch._C import _from_dlpack
+from torch.utils.dlpack import to_dlpack
 """
 
         for idx, func in enumerate(node.body):

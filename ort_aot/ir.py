@@ -18,6 +18,8 @@ from . import common
 class BufferAttr(Enum):
     GLOBAL = auto()
     ACROSS_SHARED = auto()
+
+
 class ComputeBuffer(object):
     def __init__(
         self, name: str, dtype: np.dtype = np.dtype(object), shape: list = None, data: np.ndarray = None
@@ -66,6 +68,26 @@ class ComputeBuffer(object):
 
     def __hash__(self):
         return hash(self.name)
+
+
+class IndirectPermuteBuffer(ComputeBuffer):
+    def __init__(
+        self, name: str, dtype: np.dtype = np.dtype(object), shape: list = None, data: np.ndarray = None
+    ):
+        super().__init__(name, dtype, shape, data)
+        # only works when the last axis is unchanged
+        # [0,2,1,3]?
+        self.permute_index: List[int] = None
+
+
+class IndirectSliceBuffer(ComputeBuffer):
+    def __init__(
+        self, name: str, dtype: np.dtype = np.dtype(object), shape: list = None, data: np.ndarray = None
+    ):
+        super().__init__(name, dtype, shape, data)
+        # only works when the last axis is unchanged
+        # [axis, start, end, step]
+        self.slice_index: List[List] = None
 
 
 class IRNode:
@@ -309,6 +331,7 @@ class FunctionNode(IRNode):
         self.shape_var = []
         self.body: List[ExecutionBlock] = None
         self.hw_context: common.HardwareContext = None
+        self.target = ""
 
 
 class ModuleNode(IRNode):
@@ -346,42 +369,68 @@ class Indexer:
     def __init__(self):
         self.buf_index = None
 
-    def cal_stride(self, shape):
+    def cal_stride(self, shape, buf: ComputeBuffer):
         stride = [1]
         for i in range(len(shape) - 1, 0, -1):
             stride.append(stride[-1] * shape[i])
-        return stride[::-1]
+        stride = stride[::-1]
+
+        if isinstance(buf, IndirectSliceBuffer):
+            for iter_axis in buf.slice_index:
+                axis, _, _, step = iter_axis
+                stride[axis] *= step
+
+        return stride
+
+    def get_iter_var_by_buffer_type(self, buf: ComputeBuffer, shape: List[sympy.Expr]):
+        index: sympy.Expr = buf.loop_index or [
+            sympy_utils.sympy_symbol(f"i_{i}") for i in range(len(shape) - 1, -1, -1)]
+        if len(index) > len(shape):
+            index = index[len(index) - len(shape):]
+
+        if isinstance(buf, IndirectPermuteBuffer):
+            assert len(buf.permute_index) == len(shape)
+            index = [index[i] for i in buf.permute_index]
+        elif isinstance(buf, IndirectSliceBuffer):
+            for iter_axis in buf.slice_index:
+                axis, start, _, _ = iter_axis
+                index[axis] += start
+        elif isinstance(buf, ComputeBuffer):
+            pass
+        else:
+            raise NotImplementedError
+        return index
+
+    def gen_index_expr(self, named_var: str, buf: ComputeBuffer, for_triton: bool = False):
+        shape = buf.shape or (buf.data is not None and buf.data.shape) or [1]
+        shape = shape.copy()
+        shape = shape[-1:] if buf.attr_cross_loop else shape
+        stride = self.cal_stride(shape, buf)
+        if for_triton:
+            shape[-1] = 1
+            if shape == [1]:
+                return f"{named_var}"
+        index_of_dim_1 = [i for i in range(len(shape)) if shape[i] == 1]
+
+        # broadcast handling
+        br_index = self.get_iter_var_by_buffer_type(buf, shape)  # [v for idx, v in enumerate(index) if idx not in index_of_dim_1]
+        br_stride = [v if idx not in index_of_dim_1 else 0 for idx, v in enumerate(stride)]
+
+        expand_opt = create_expand_pow_optimization(6)
+        res = expand_opt(sympy_utils.sympy_dot(br_index, br_stride))
+        gs = re.findall("([a-zA-Z0-9_]+)\\*\\*(\\d)", str(res))
+        assert (gs == [])  # or gs[0][1] == '2', f"TODO fix me when pow {gs[0][1]} or other"
+        # res= re.sub('([a-zA-Z0-9_]+)\*\*(\d)','\g<1>*\g<1>',str(res))
+        return res
 
     def code_gen(self, named_var: str, buf: ComputeBuffer, for_triton: bool = False):
         if (buf.data is not None and buf.data.size == 1) or not buf.shape:
             return f"{named_var}"
-        else:
-            shape = buf.shape or (buf.data is not None and buf.data.shape) or [1]
-            shape = shape.copy()
-            shape = shape[-1:] if buf.attr_cross_loop else shape
-            stride = self.cal_stride(shape)
-            if for_triton:
-                shape[-1] = 1
-                if shape == [1]:
-                    return f"{named_var}"
-            index_of_dim_1 = [i for i in range(len(shape)) if shape[i] == 1]
 
-            index: sympy.Expr = buf.loop_index or [sympy_utils.sympy_symbol(
-                f"i_{i}") for i in range(len(shape) - 1, -1, -1)]
-            if len(index) > len(shape):
-                index = index[len(index) - len(shape):]
-            # broadcast handling
-            br_index = [v for idx, v in enumerate(index) if idx not in index_of_dim_1]
-            br_stride = [v for idx, v in enumerate(stride) if idx not in index_of_dim_1]
-
-            expand_opt = create_expand_pow_optimization(6)
-            res = expand_opt(sympy_utils.sympy_dot(br_index, br_stride))
-            gs = re.findall("([a-zA-Z0-9_]+)\\*\\*(\\d)", str(res))
-            assert (gs == [])  # or gs[0][1] == '2', f"TODO fix me when pow {gs[0][1]} or other"
-            # res= re.sub('([a-zA-Z0-9_]+)\*\*(\d)','\g<1>*\g<1>',str(res))
-            if for_triton:  # gpu
-                return f"{named_var}+{res}"
-            return f"{named_var}[{res}]"
+        index_expr = self.gen_index_expr(named_var, buf, for_triton)
+        if for_triton:  # gpu
+            return f"{named_var}+{index_expr}"
+        return f"{named_var}[{index_expr}]"
         pass
 
 
