@@ -6,6 +6,7 @@ from typing import List, Tuple, Dict, Set
 import types
 import tempfile
 from pathlib import Path
+import functools
 
 def replace_graph_input(model:onnx.ModelProto, input_shapes:List[List[int]]):
     """
@@ -26,6 +27,7 @@ def replace_graph_input(model:onnx.ModelProto, input_shapes:List[List[int]]):
     return onnx.shape_inference.infer_shapes(model, strict_mode=True)
 
 
+@functools.lru_cache(None)
 def compile_for_ort_training(func_name:str, model:onnx.ModelProto, deterministic_input_shapes: List[List[int]])->types.ModuleType:
     model_with_name = {func_name: model}
     return compile_for_ort_training(model_with_name, deterministic_input_shapes)
