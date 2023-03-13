@@ -331,7 +331,7 @@ from torch.utils.dlpack import to_dlpack
             elif node.op_type == "Mul":
                 src += f"{named_var_o} = {named_vars_i[0]} * ({named_vars_i[1]})\n"
             elif node.op_type == "Relu":
-                src += f"{named_var_o} = {vectorized_prefix}max<float>({named_vars_i[0]}, {'vec_zero' if node.vectorization else '0.f'})\n"
+                src += f"{named_var_o} = {vectorized_prefix}maximum({named_vars_i[0]}, '0.f')\n"
             elif node.op_type == "Pow":
                 # rewrite pow as mul
                 if raw_named_vars_1 == 2:
@@ -339,11 +339,11 @@ from torch.utils.dlpack import to_dlpack
                 elif raw_named_vars_1 == 3:
                     src += f"{named_var_o} = {named_vars_i[0]} * {named_vars_i[0]}* {named_vars_i[0]}\n"
                 else:
-                    src += f"{named_var_o} = pow({named_vars_i[0]},{named_vars_i[1]})\n"
+                    src += f"{named_var_o} = {vectorized_prefix}libdevice.pow({named_vars_i[0]}, {named_vars_i[1]})\n"
             elif node.op_type == "Sqrt":
                 src += f"{named_var_o} = {vectorized_prefix}sqrt({named_vars_i[0]})\n"
             elif node.op_type == "Rsqrt":
-                if node.vectorization:
+                if node.use_lib_device:
                     src += (
                         f"{named_var_o} = {vectorized_prefix}rsqrt({named_vars_i[0]})\n"
                     )
@@ -354,32 +354,38 @@ from torch.utils.dlpack import to_dlpack
                 to_dtype = node.output[0].dtype.type
                 if to_dtype == np.bool_:
                     src += f"{named_var_o} = {named_vars_i[0]} != {_get_type(from_dtype)}(0)\n"
+                elif to_dtype == np.float32:
+                    src += f"{named_var_o} = ({named_vars_i[0]}).to(tl.float32)\n"
+                elif to_dtype == np.float16:
+                    src += f"{named_var_o} = ({named_vars_i[0]}).to(tl.float16)\n"
                 else:
-                    src += f"{named_var_o} = ({named_vars_i[0]})\n"
+                    raise NotImplementedError(f"Cast to {to_dtype} is not supported")
             elif node.op_type == "Erf":
-                # 2/sqrt(M_PI) = 1.1283791671f
-                src += f"{named_var_o} = tanh_mlas({named_vars_i[0]}*({named_vars_i[0]}*{named_vars_i[0]}*2*0.044715f+1.f)*1.1283791671f)\n"
+                src += f"{named_var_o} = {vectorized_prefix}libdevice.erf({named_vars_i[0]})\n"
             elif node.op_type == "Gelu":
-                # sqrt(2/M_PI) = 0.7978845608f
-                src += f"{named_var_o} = {named_vars_i[0]}*(tanh_mlas( ({named_vars_i[0]}*({named_vars_i[0]}* {named_vars_i[0]}*0.044715f+1.0f) *0.7978845608f ))+1.0f)*0.5f\n"
+                src += f"{named_var_o} = ({vectorized_prefix}libdevice.erf({named_vars_i[0]}/1.41421356237)+1.0)*0.5\n"
             elif node.op_type == "Exp":
                 src += f"{named_var_o} = {vectorized_prefix}exp({named_vars_i[0]})\n"
             elif node.op_type == "Tanh":
-                src += f"{named_var_o} = tanh_mlas({named_vars_i[0]})\n"
+                src += f"{named_var_o} = {vectorized_prefix}libdevice.tanh({named_vars_i[0]})\n"
             elif node.op_type == "Where":
-                if node.vectorization:
-                    src += f"{named_var_o} = {vectorized_prefix}blend({named_vars_i[1]},{named_vars_i[2]},{named_vars_i[0]})\n"
+                src += f"{named_var_o} = {vectorized_prefix}where({named_vars_i[0]},{named_vars_i[1]},{named_vars_i[2]})\n"
+            elif node.op_type == "Sigmoid":
+                if node.use_lib_device:
+                    src += f"{named_var_o} = {vectorized_prefix}libdevice.sigmoid({named_vars_i[0]})\n"
                 else:
-                    src += f"{named_var_o} = {named_vars_i[0]} ? {named_vars_i[1]} : {named_vars_i[2]}\n"
+                    src += f"{named_var_o} = {vectorized_prefix}sigmoid({named_vars_i[0]})\n"
+            elif node.op_type == "Log":
+                if node.use_lib_device:
+                    src += f"{named_var_o} = {vectorized_prefix}libdevice.log({named_vars_i[0]})\n"
+                else:
+                    src += f"{named_var_o} = {vectorized_prefix}log({named_vars_i[0]})\n"
             else:
                 raise Exception(f"not supported {node.op_type}")
             return src
 
         space_indent = " " * indent
         src = space_indent + f"# {node.op_name} {node.op_type}\n"
-
-        if node.op_type == "Relu" and node.vectorization:
-            src += space_indent + "mipp::Reg<float> vec_zero = 0.0f\n"
         src += space_indent + gen_cpp_code_for_op(var_context)
         return src
 

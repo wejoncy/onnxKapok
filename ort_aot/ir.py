@@ -349,6 +349,8 @@ class ComputeNode(IRNode):
         self.input = inputs
         self.output = outputs
         self.op_name = op_name
+        # triton only
+        self.use_lib_device = True
 
     @property
     def op_type(self):
