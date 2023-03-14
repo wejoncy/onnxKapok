@@ -269,15 +269,11 @@ class OnnxInGraph(object):
 
         for inp in self.graph.input:
             self.node_name2module["out_" + inp.name] = inp
-        self.graph_input_names.extend(
-            ["out_" + inp.name for inp in self.graph.input])
+        self.graph_input_names.extend(["out_" + inp.name for inp in self.graph.input])
 
         for out in self.graph.output:
-            self.node_name2module[
-                "out_" + out.name
-            ] = out  # add `out_` in case the output has the same name with the last node
-        self.graph_output_names = [
-            "out_" + out.name for out in self.graph.output]
+            self.node_name2module["out_" + out.name] = out  # add `out_` in case the output has the same name with the last node
+        self.graph_output_names = ["out_" + out.name for out in self.graph.output]
         if infer_shape:
             symbol_shape, rt_shape = self.get_all_shape_from_onnx_model(self.model_proto)
             self.tensor_type_shape_info = symbol_shape
