@@ -106,7 +106,7 @@ class GPUCodeGen(common.NodeVisitor):
         # forward declaration
         for fvar, buffer_l in node.forward_var_set.items():
             if node.step == node.end:
-               break
+                break
             buffer = buffer_l[0] if isinstance(buffer_l, list) else buffer_l
             str_var = str(fvar)
             if buffer.shape is not None and buffer.shape[-1] == 1:
@@ -122,7 +122,10 @@ class GPUCodeGen(common.NodeVisitor):
                     assert False, ("unsupported reduction type: %s" % node.reduction_var[str_var])
 
                 dec_header += need_indent + f"{var_map[str_var]} = {init_val}\n"
-                if node.vectorization:
+                # Ideally, we should not need to have this special case, this var is not a reduction var and it's has shape[-1]=1
+                # but we don't have a CSE pass to remove the redundant computation,
+                # so we need to do this to avoid more redundant computation in recomputation
+                if not node.recompute or str_var in node.reduction_var:
                     dtype = _get_type(buffer.dtype)
                     dec_header += need_indent + \
                         f"vec_{var_map[str_var]} = tl.zeros([RBLOCK], dtype=tl.{buffer.dtype.name})\n"
@@ -150,18 +153,29 @@ class GPUCodeGen(common.NodeVisitor):
                 tmod = f"%({nest_shape[idx-1]})" if idx > 0 else ""
                 src += need_indent + f"{nt_var} = ({p_var}{tdiv}){tmod}\n"
             src += (need_indent + f"{common.SpecialVar().rbase} = tl.arange(0, RBLOCK)\n\n\n")
-
         else:
             if node.step == node.end:
-                ##### TODO FIXME HACK
+                # TODO FIXME HACK
                 for idx, g in enumerate(node.body):
                     if g.op_type in node_sets.ReduceNodeSetInternal():
                         g.is_final = True
-                pass
+                        
+                src += need_indent + f"roffset = rbase\n"
+                src += need_indent + f"triton_rmask = roffset < tl.minimum(RBLOCK, {node.end})\n"
             else:
                 assert node.start == 0, "only support start from 0"
+                src += "\n"
+                src += need_indent + f"triton_rmask_s0 = {common.SpecialVar().rbase} < tl.minimum(RBLOCK, {node.end})\n"
+
                 src += need_indent+f"for {node.var} in range({node.start}, {node.end}, {node.step}):\n"
                 indent += 4
+                need_indent = " " * indent
+                if node.recompute:
+                    src += need_indent + f"roffset = rbase + i_0\n"
+                    src += need_indent + f"triton_rmask = roffset < tl.minimum(RBLOCK, {node.end})\n"
+                else:
+                    src += need_indent + f"roffset = rbase\n"
+                    src += need_indent + f"triton_rmask = roffset < tl.minimum(RBLOCK, {node.end})\n"
 
         if isinstance(node.body, list):
             for idx, g in enumerate(node.body):
@@ -183,13 +197,13 @@ class GPUCodeGen(common.NodeVisitor):
             assert (s_var in var_map and s_var in node.global_connections), f"{s_var} not in var_map"
             op_type = node.global_connections[s_var].producers[0].op_type
             w_var = var_map[s_var]
-            src += (need_indent + f"{v_var} = tl.where(triton_mask_1, {v_var}, 0.0)\n")
+            src += (need_indent + f"{v_var} = tl.where(triton_rmask_s0, {v_var}, 0.0)\n")
             if op_type == "ReduceSum":
                 src += need_indent + f"{w_var} = tl.sum({v_var}, axis=0)\n"
             elif op_type == "ReduceMax":
                 src += need_indent + f"{w_var} = tl.max({v_var}, axis=0)\n"
             else:
-                raise NotImplementedError(f"not support {vec_func} yet")
+                raise NotImplementedError(f"not support {op_type} yet")
             src += need_indent + f"{v_var} = {w_var}\n"
         return src
 
@@ -241,14 +255,14 @@ def call{node.name}(*args):
 
 '''
         else:
-        # when generate code for triton_ort_training. we are running in JIT mode, so all the shapes are known
+            # when generate code for triton_ort_training. we are running in JIT mode, so all the shapes are known
             import torch
             final_shape = list(node.output[0].shape)
             torch_dtype = torch.from_numpy(np.zeros(1, dtype=node.output[0].dtype)).dtype
             for out in node.output:
                 assert len(out.shape) == len(final_shape), "output shape dim not match"
                 for idx, v in enumerate(final_shape):
-                    final_shape[idx] = max(v,out.shape[idx])
+                    final_shape[idx] = max(v, out.shape[idx])
             n_elements_in_last_dim = final_shape[-1]
 
             # allocate output tensor
@@ -353,7 +367,7 @@ from torch.utils.dlpack import to_dlpack
                 from_dtype = node.input[0].dtype
                 to_dtype = node.output[0].dtype.type
                 if to_dtype == np.bool_:
-                    src += f"{named_var_o} = {named_vars_i[0]} != {_get_type(from_dtype)}(0)\n"
+                    src += f"{named_var_o} = {named_vars_i[0]} != 0\n"
                 elif to_dtype == np.float32:
                     src += f"{named_var_o} = ({named_vars_i[0]}).to(tl.float32)\n"
                 elif to_dtype == np.float16:
@@ -392,7 +406,7 @@ from torch.utils.dlpack import to_dlpack
     def ReduceNode(self, node: ReduceNode, var_context: common.CodeGenContext, indent: int):
         var_map = var_context.var_map
         vec_var_map = var_context.vectorized_var_set
-        code = "\n"
+        code = ""
         input_key = [i.name for i in node.input]
         output_key = [i.name for i in node.output]
         out_dtype = _get_type(node.output[0].dtype)
@@ -418,7 +432,7 @@ from torch.utils.dlpack import to_dlpack
         # FIXME, shouldn't use is_final
         if node.is_final:
             default_value = '0.0' if node.body.op_type == "ReduceSum" else 'float("-inf")'
-            code += (" " * indent + f"{named_var_i} = {vec_pre}where(triton_mask_1, {named_var_i}, {default_value})\n")
+            code += (" " * indent + f"{named_var_i} = {vec_pre}where(triton_rmask, {named_var_i}, {default_value})\n")
             if node.body.op_type == "ReduceSum":
                 code += (" " * indent + f"{named_var_o} = {vec_pre}sum({named_var_i}, 0)\n")
             elif node.body.op_type == "ReduceMax":
@@ -430,7 +444,7 @@ from torch.utils.dlpack import to_dlpack
                 code += (" " * indent + f"{named_var_o} += {named_var_i}\n")
             elif node.body.op_type == "ReduceMax":
                 code += (" " * indent +
-                        f"{named_var_o} = {vec_pre}where(({named_var_o} < {named_var_i}), {named_var_i}, {named_var_o})\n")
+                         f"{named_var_o} = {vec_pre}where(({named_var_o} < {named_var_i}), {named_var_i}, {named_var_o})\n")
             else:
                 raise Exception(f"not supported {node.body.op_type}")
         return code
@@ -441,7 +455,7 @@ from torch.utils.dlpack import to_dlpack
         space_indent = " " * indent
         code = ""
         var_name, mask_name = (i.name for i in node.input)
-        input_buf:ComputeBuffer = node.input[0]
+        input_buf: ComputeBuffer = node.input[0]
         assert var_name in var_map, f"name {var_name} not found in var_map"
         named_var = var_map[var_name]
 
@@ -461,12 +475,14 @@ from torch.utils.dlpack import to_dlpack
             return code + space_indent + f"vec_{named_var} = {load_addr}[i_0*RBLOCK:(i_0+1)*RBLOCK]\n"
 
         if input_buf.shape == [] or input_buf.shape[-1] == 1:
-            mask_name = ''
+            mask_and_other = ''
         else:
             code += space_indent + f"roffset = {rbase} # + offset\n"
-            code += space_indent + f"{mask_name} = roffset < tl.minimum(RBLOCK,{input_buf.shape[-1]})\n"
+            # code += space_indent + f"{mask_name} = roffset < tl.minimum(RBLOCK,{input_buf.shape[-1]})\n"
+            mask_name = 'triton_rmask'
             load_addr = f"{load_addr}+roffset"
-        return (code + space_indent + f"vec_{named_var} = tl.load({load_addr}, {mask_name}, other=0.0)\n")
+            mask_and_other = f'{mask_name}, other=0.0'
+        return (code + space_indent + f"vec_{named_var} = tl.load({load_addr},{mask_and_other} )\n")
 
     def MaskStoreNode(self, node: MaskStoreNode, var_context: common.CodeGenContext, indent: int):
         var_map = var_context.var_map
@@ -487,7 +503,8 @@ from torch.utils.dlpack import to_dlpack
             return code + space_indent + f"e_{annotated_var}[i_0*RBLOCK:(i_0+1)*RBLOCK] = {named_var}\n"
 
         code += space_indent + f"roffset = {rbase} # + offset\n"
-        code += space_indent + f"{mask_name} = roffset <  tl.minimum(RBLOCK,{input_buf.shape[-1]})\n"
+        # code += space_indent + f"{mask_name} = roffset <  tl.minimum(RBLOCK,{input_buf.shape[-1]})\n"
+        mask_name = 'triton_rmask'
         if input_buf.dtype.type == np.bool_:
             assert False, "bool type not supported"
         else:
@@ -503,8 +520,10 @@ from torch.utils.dlpack import to_dlpack
         dec_for_sub_loop = ""
         var_declared = set()
         if node.forward_var_set:
-            for fvs in node.forward_var_set:
-                for str_var, buffer_l in fvs.items():
+            for idx in range(len(node.forward_var_set)):
+                fvs = node.forward_var_set[idx]
+                for str_var in list(fvs.keys()):
+                    buffer_l = fvs[str_var]
                     assert len(buffer_l) == 1 if isinstance(buffer_l, list) else True
                     buffer = buffer_l[0] if isinstance(buffer_l, list) else buffer_l
                     if buffer.shape[-1] == 1:
@@ -513,8 +532,9 @@ from torch.utils.dlpack import to_dlpack
                         fvs.pop(str_var)
                         continue
                     var_declared.add(str_var)
-                    initialize_assign = f'= tl.zeros([tl.cdiv({buffer.shape[-1]},RBLOCK)*RBLOCK], dtype=tl.{buffer.dtype.name})'
-                    dec_for_sub_loop += (need_indent + f"e_{var_map[str_var]} {initialize_assign}\n")
+                    if not node.recompute:
+                        initialize_assign = f'= tl.zeros([tl.cdiv({buffer.shape[-1]},RBLOCK)*RBLOCK], dtype=tl.{buffer.dtype.name})'
+                        dec_for_sub_loop += (need_indent + f"e_{var_map[str_var]} {initialize_assign}\n")
                     fvs.pop(str_var)
             dec_for_sub_loop += '\n'
         src += dec_for_sub_loop

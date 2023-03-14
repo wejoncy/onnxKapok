@@ -124,12 +124,15 @@ def shape_infer_for_test(onnx_model_map):
     input_shapes = [utils.get_shape_from_value_info(inp) for inp in onnx_model.graph.input]
     output_shapes = [utils.get_shape_from_value_info(out) for out in onnx_model.graph.output]
 
-    if all([ isinstance(i,int) for i in  input_shapes[0]]):
+    if all([isinstance(i, int) for input_shape in input_shapes for i in input_shape]):
         return  input_shapes, input_dtypes, [], output_shapes
 
-    if len(input_shapes) > 1:
-        output_shapes[0][0] = 'batch'
-        input_shapes[1][0] = 'batch'
+    try:
+        if len(input_shapes) > 1:
+            output_shapes[0][0] = 'batch'
+            input_shapes[1][0] = 'batch'
+    except:
+        pass
 
     in_dynamic_shape_axis = [
         [idx for idx, i in enumerate(in_shape) if isinstance(i, str)]
@@ -219,11 +222,11 @@ def run_triton_func(func_name, lib_path, input_arg, shape_arg, output_arg):
     if not isinstance(lib_path, types.ModuleType):
         call_arg = (tuple(input_arg), (output_arg), tuple(shape_arg))
         # warm up
-        call_func(call_arg)
+        call_func(*call_arg)
 
         with CostTime(c_tc) as tc:
-            for i in range(100):
-                call_func(call_arg)
+            for i in range(10000):
+                call_func(*call_arg)
     else:
         import torch
         from torch.utils.dlpack import to_dlpack

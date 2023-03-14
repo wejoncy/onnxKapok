@@ -117,12 +117,13 @@ class Loop(IRNode):
     def __init__(self):
         super().__init__()
         self.var: sympy.Expr = None
-        self.reduction_var: OrderedDict = None
+        self.reduction_var: OrderedDict = {}
         self.start = sympy.Integer(0)
         self.end = sympy.Integer(0)
         self.step = sympy.Integer(1)
         self.body = None
         self.depth = 0
+        self.recompute = False
         self.parallel: bool = False
         self.parallel_nest_loop: Union[Loop, List[Loop]] = None
         self.attributes = LoopAttr.ScalarLoop
@@ -169,6 +170,7 @@ class ExecutionBlock(IRNode):
         self.load = OrderedDict()
         self.loop_stack = []
         self.has_reduce = False
+        self.recompute = False
         self.reduction_var = OrderedDict()
         # TODO support multiple outputs
         self.dtype = list(group[0].output_with_shapes.values())[0][0]
@@ -411,7 +413,7 @@ class Indexer:
         if for_triton:
             shape[-1] = 1
             if shape == [1]:
-                return f"{named_var}"
+                return ""
         index_of_dim_1 = [i for i in range(len(shape)) if shape[i] == 1]
 
         # broadcast handling
@@ -431,7 +433,9 @@ class Indexer:
 
         index_expr = self.gen_index_expr(named_var, buf, for_triton)
         if for_triton:  # gpu
-            return f"{named_var}+{index_expr}"
+            if index_expr:
+                index_expr=f"+{index_expr}"
+            return f"{named_var}{index_expr}"
         return f"{named_var}[{index_expr}]"
         pass
 

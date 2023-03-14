@@ -20,7 +20,7 @@ class ElementWiseNodeSet:
             "Relu",
             # "Equal",
             # "Not",
-            # "Where",
+            "Where",
         }
     )
 

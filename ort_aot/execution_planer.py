@@ -282,8 +282,8 @@ class InterGroupStrategy(object):
     def do_fusion_for_triton(self, nodes):
         return [nodes]
 
-    def do_fusion(self, nodes):
-        if "triton" in self.target:
+    def do_fusion(self, nodes, loop_range: int):
+        if "triton" in self.target and (not loop_range.is_number or loop_range <= 1024):
             return self.do_fusion_for_triton(nodes)
         before_fusion_groups = deque()
         after_fusion_groups = deque()
@@ -353,14 +353,10 @@ class ExecutionPrepare(object):
 
     def analyze_io_buffer(self, groups, analyze_io: callable):
         cached_buffer: Dict[str, ComputeBuffer] = OrderedDict()
-        type_and_shape = self.edge_graph.type_and_shape
-        for i in self.edge_graph.model.graph.input:
-            ins = utils.convert_onnx_value_to_computebuffer(i, prefix='out_')
-            self.external_buffer.var_buffer_in.append(ins)
+
+        for ins in self.external_buffer.var_buffer_in:
             cached_buffer[ins.name] = ins
-        for i in self.edge_graph.model.graph.output:
-            outs = utils.convert_onnx_value_to_computebuffer(i, prefix='out_')
-            self.external_buffer.var_buffer_out.append(outs)
+        for outs in self.external_buffer.var_buffer_out:
             cached_buffer[outs.name] = outs
         for i in self.edge_graph.model.graph.initializer:
             self.external_buffer.const_buffer.append(i)
@@ -380,16 +376,33 @@ class ExecutionPrepare(object):
         for g in groups:
             analyze_io(g, self.external_buffer, self.edge_graph, cached_buffer, self.target)
 
-    def create_execution_plan(self, analyze_io: callable):
+    def extract_graph_io(self):
         for i in self.edge_graph.model.graph.input:
             self.graph_io_name.add('out_' + i.name)
         for i in self.edge_graph.model.graph.output:
             self.graph_io_name.add('out_' + i.name)
 
+        for i in self.edge_graph.model.graph.input:
+            ins = utils.convert_onnx_value_to_computebuffer(i, prefix='out_')
+            self.external_buffer.var_buffer_in.append(ins)
+        for i in self.edge_graph.model.graph.output:
+            outs = utils.convert_onnx_value_to_computebuffer(i, prefix='out_')
+            self.external_buffer.var_buffer_out.append(outs)
+        for i in self.edge_graph.model.graph.initializer:
+            self.external_buffer.const_buffer.append(i)
+        for i in self.edge_graph.constant_nodes.values():
+            self.external_buffer.const_buffer.append(i)
+
+    def create_execution_plan(self, analyze_io: callable):
+        self.extract_graph_io()
         sorted_nodes = self.topological_with_reduce_last()
 
+        # hack out the loop_range
+        loop_range = 0
+        for out in self.external_buffer.var_buffer_out:
+            loop_range = max(loop_range, out.shape[-1])
         intergroup_st = InterGroupStrategy(self.target)
-        node_group = intergroup_st.do_fusion(nodes=sorted_nodes)
+        node_group = intergroup_st.do_fusion(sorted_nodes, loop_range)
 
         # convert to IRNode/ ExecutionBlock
         fusion_blocks = []

@@ -203,6 +203,7 @@ class GraphLowering(common.NodeVisitor):
                 schedule = scheduling.Schedule()
             blocks = schedule.fusion_op(blocks, set(i.name for i in global_buffer.var_buffer_in),
                                         set(i.name for i in global_buffer.var_buffer_out))
+            blocks = schedule.enable_recompute_for_reduction(blocks)
             blocks = schedule.tile_inner_loop(blocks, context.vec_lanes)
             if allow_vectorize or "triton" in self.target:
                 blocks = schedule.vectoring_inner_loop(blocks, context.vec_lanes)

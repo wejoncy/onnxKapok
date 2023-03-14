@@ -165,6 +165,11 @@ class Schedule(object):
         blocks[0].body = do_tile_loop(bb1.body)
         return blocks
 
+    # only works for reduction && triton
+    @abstractmethod
+    def enable_recompute_for_reduction(self, blocks: List[Igniter_IR.ExecutionBlock]):
+        return blocks
+
     @abstractmethod
     def vectoring_inner_loop(
         self, blocks: List[Igniter_IR.ExecutionBlock], lanes: int = 16
@@ -302,15 +307,115 @@ class GPUSchedule(Schedule):
         blocks[0].body = do_tile_loop(bb1.body)
         return blocks
 
-    def update_IO_after_fusion_op(
-        self, bb1: Igniter_IR.ExecutionBlock, bb2: Igniter_IR.ExecutionBlock,
-        global_input: Set[str], global_output: Set[str]
-    ):
-        super().update_IO_after_fusion_op(bb1, bb2, global_input, global_output)
-        # for k,v in bb1.forward_var_set[0].items():
-        #    if 'out_'+k not in global_input and 'out_'+k not in global_output:
-        #        v.attributes.add(Igniter_IR.BufferAttr.ACROSS_SHARED)
-        return
+    @staticmethod
+    def get_all_inputs_need_recompute(loop: Igniter_IR.Loop, graph_inputs: List[Igniter_IR.ComputeBuffer],
+                                      graph_outputs: List[Igniter_IR.ComputeBuffer]):
+        # order is not important
+        inputs_set = set()
+        outputs_set = set()
+        for op in loop.body:
+            for i in op.input:
+                inputs_set.add(i)
+            for o in op.output:
+                outputs_set.add(o)
+        extern_inputs = []
+        # 1. input is not a scalar
+        # 2. input is not in graph_inputs
+        for inp in (inputs_set - outputs_set):
+            if inp.predecessor is None or inp.shape[-1] == 1 or inp in graph_inputs or inp in graph_outputs:
+                continue
+
+            extern_inputs.append(inp)
+
+        return extern_inputs
+
+    @staticmethod
+    def collect_predecessors_for_recompute(inputs: List[Igniter_IR.ComputeBuffer],
+                                           graph_inputs: List[Igniter_IR.ComputeBuffer],
+                                           graph_outputs: List[Igniter_IR.ComputeBuffer], load_map: Dict,
+                                           forward_var_set: Dict[str, Igniter_IR.ComputeBuffer]):
+        # order is not important
+        inputs_set = set()
+        for inp in inputs:
+            if inp.predecessor is None or inp.shape[-1] == 1:
+                forward_var_set[inp.name] = inp
+                continue
+            if inp in graph_inputs or inp in graph_outputs:
+                reused_loadnode = load_map[inp.name]
+                inputs_set.add(reused_loadnode)
+                continue
+
+            inputs_set.add(inp.predecessor)
+            inputs_set.update(GPUSchedule.collect_predecessors_for_recompute(
+                inp.predecessor.input, graph_inputs, graph_outputs, load_map, forward_var_set))
+
+        return inputs_set
+
+    # when reduction op has a lot processor ops, and the intermediate value has to be reused by many processor ops
+    # If we have enough shared memory, we can easily cache it in shared memory.
+    # However, Shared memory is always limited, so we need to recompute it when it is not cached in shared memory.
+    # It's trading less kernel launch with more computation.
+    # Could we use global memory as a cache? Not sure if triton supports it.
+    def enable_recompute_for_reduction(self, blocks: List[Igniter_IR.ExecutionBlock]):
+        assert (
+            len(blocks) == 1
+        ), " only support one block now, but got {} blocks".format(len(blocks))
+        bb1: Igniter_IR.ExecutionBlock = blocks[0]
+        if not isinstance(bb1.body, Igniter_IR.Loop):
+            return blocks
+
+        def do_recompute(top_loop: Igniter_IR.Loop):
+            if top_loop.depth > 1:
+                if isinstance(top_loop.body, list):
+                    top_loop.body = [do_recompute(i) for i in top_loop.body]
+                else:
+                    top_loop.body = do_recompute(top_loop.body)
+                return top_loop
+
+            list_loop: List[Igniter_IR.Loop] = top_loop.body if isinstance(top_loop.body, list) else [top_loop.body]
+            if len(list_loop) == 1:
+                return top_loop
+
+            load_map = {}
+            map_op_index = {}
+            idx = 0
+            for loop in list_loop:
+                for op in loop.body:
+                    map_op_index[op] = idx
+                    idx += 1
+
+                    if isinstance(op, Igniter_IR.MaskLoadNode):
+                        load_map[op.input[0].name] = op
+
+            for lidx, cur_loop in enumerate(reversed(list_loop)):
+                cur_loop.recompute = True
+                bb1.recompute = True
+                # remove unused store-node as we are going to recompute it
+                body_len = len(cur_loop.body)
+                for idx, op in enumerate(reversed(cur_loop.body.copy())):
+                    if isinstance(op, Igniter_IR.MaskStoreNode):
+                        if op.input[0] not in bb1.output:
+                            cur_loop.body.pop(body_len-1-idx)
+                    elif isinstance(op, Igniter_IR.MaskLoadNode):
+                        if op.input[0] not in bb1.input and op.input[0] not in bb1.output:
+                            cur_loop.body.pop(body_len-1-idx)
+
+                input_need_recompute = self.get_all_inputs_need_recompute(cur_loop, bb1.input, bb1.output)
+                if not input_need_recompute:
+                    continue
+                lidx = len(list_loop)-1-lidx-1
+                prev_forward_map = list_loop[lidx].forward_var_set if lidx >= 0 else {}
+                nodes_for_recompute = self.collect_predecessors_for_recompute(
+                    input_need_recompute, bb1.input, bb1.output, load_map, prev_forward_map)
+                nodes_for_recompute = list(nodes_for_recompute)
+                sorted_nodes_for_recompute = sorted(nodes_for_recompute, key=lambda x: map_op_index[x])
+                cur_loop.body = sorted_nodes_for_recompute + cur_loop.body
+
+
+            return top_loop
+
+        blocks[0].body = do_recompute(bb1.body)
+        return blocks
 
     def vectoring_inner_loop(
         self, blocks: List[Igniter_IR.ExecutionBlock], lanes: int = 1024
@@ -331,7 +436,6 @@ class GPUSchedule(Schedule):
             try_simplify = (loop.end - loop.start) > lanes
             if (
                 loop.start != 0
-                or (try_simplify.is_Boolean and try_simplify)
                 or loop.step != 1
                 or loop.vectorization
                 or loop.parallel
@@ -340,7 +444,10 @@ class GPUSchedule(Schedule):
                 assert (loop.body[0].vectorization == False), "op in this loop should not be vectorized"
                 return loop
             loop.vectorization = True
-            loop.step = loop.end  # sympy_utils.sympy_symbol(name="RBLOCK")
+            if try_simplify.is_Boolean and try_simplify:
+                loop.step = sympy_utils.sympy_symbol(name="RBLOCK")
+            else:
+                loop.step =  loop.end
             for op in loop.body:
                 assert isinstance(op, Igniter_IR.IRNode), f"expected op to be IRNode, but got {type(op)}"
                 op.vectorization = True
