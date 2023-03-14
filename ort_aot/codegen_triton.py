@@ -477,7 +477,7 @@ from torch.utils.dlpack import to_dlpack
         if input_buf.shape == [] or input_buf.shape[-1] == 1:
             mask_and_other = ''
         else:
-            code += space_indent + f"roffset = {rbase} # + offset\n"
+            #code += space_indent + f"roffset = {rbase} # + offset\n"
             # code += space_indent + f"{mask_name} = roffset < tl.minimum(RBLOCK,{input_buf.shape[-1]})\n"
             mask_name = 'triton_rmask'
             load_addr = f"{load_addr}+roffset"

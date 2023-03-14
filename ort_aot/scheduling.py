@@ -337,12 +337,12 @@ class GPUSchedule(Schedule):
         # order is not important
         inputs_set = set()
         for inp in inputs:
-            if inp.predecessor is None or inp.shape[-1] == 1:
-                forward_var_set[inp.name] = inp
-                continue
             if inp in graph_inputs or inp in graph_outputs:
                 reused_loadnode = load_map[inp.name]
                 inputs_set.add(reused_loadnode)
+                continue
+            if inp.predecessor is None or inp.shape[-1] == 1:
+                forward_var_set[inp.name] = inp
                 continue
 
             inputs_set.add(inp.predecessor)
