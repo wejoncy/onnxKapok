@@ -23,10 +23,9 @@ jobs:
   mac_build:
     runs-on: macos-12
     steps:
-    - uses: actions/checkout@v2
     - name: Setup Debug Session
       uses: csexton/debugger-action@master
-
+    - uses: actions/checkout@v2
     #- name: Build
     #  run: swift build
     #- name: Run tests
