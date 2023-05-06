@@ -22,12 +22,12 @@ concurrency:
 jobs:
   mac_build:
     runs-on: macos-12
-     steps:
-      - uses: actions/checkout@v2
-      - name: Build
-        run: swift build
-      - name: Run tests
-        run: swift test
+    steps:
+    - uses: actions/checkout@v2
+    - name: Build
+      run: swift build
+    - name: Run tests
+      run: swift test
   # This workflow contains a single job called "build"
   linux_build_and_test:
     # The type of runner that the job will run on
