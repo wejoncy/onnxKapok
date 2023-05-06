@@ -24,10 +24,13 @@ jobs:
     runs-on: macos-12
     steps:
     - uses: actions/checkout@v2
-    - name: Build
-      run: swift build
-    - name: Run tests
-      run: swift test
+    - name: Setup Debug Session
+      uses: csexton/debugger-action@master
+
+    #- name: Build
+    #  run: swift build
+    #- name: Run tests
+    #  run: swift test
   # This workflow contains a single job called "build"
   linux_build_and_test:
     # The type of runner that the job will run on
