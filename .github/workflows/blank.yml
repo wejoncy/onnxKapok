@@ -1,0 +1,88 @@
+# This is a basic workflow to help you get started with Actions
+
+name: CI
+
+# Controls when the workflow will run
+on:
+  # Triggers the workflow on push or pull request events but only for the "main" branch
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+  
+# cancel previous run when pushed a new commit
+concurrency: 
+  group: ${{ github.head_ref }}
+  cancel-in-progress: true
+
+# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+jobs:
+  mac_build:
+    runs-on: macos-12
+    steps:
+    - name: Setup Debug Session
+      uses: csexton/debugger-action@master
+    - uses: actions/checkout@v2
+    #- name: Build
+    #  run: swift build
+    #- name: Run tests
+    #  run: swift test
+  # This workflow contains a single job called "build"
+  linux_build_and_test:
+    # The type of runner that the job will run on
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+
+    # Steps represent a sequence of tasks that will be executed as part of the job
+    steps:
+      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
+      - uses: actions/checkout@v3
+        with:
+          submodules: true
+          ref: triton
+
+      - uses: actions/setup-python@v3
+        with:
+          python-version: '3.8.x'
+          architecture: 'x64'
+          
+      - name: Check python style
+        run: |
+          python3 -m pip install autopep8
+          autopep8 --max-line-length=120 -a -r -d --exit-code ./ort_aot || ( echo '::error title=Style issues::Please run \"autopep8 -a -r -i ./ort_aot\"' ; exit 1 )
+          
+      # Runs a single command using the runners shell
+      - name: install python package
+        run: |
+          python3 -m pip install -r requirements.txt
+          python3 -m pip install cmake
+
+      - name: install onnxruntime wiht AotAnyOp
+        run: python3 -m pip install --upgrade --force-reinstall  thirdparty/onnxruntime-1.15.0-cp38-cp38-linux_x86_64.whl
+
+
+      # Runs a single command using the runners shell
+      - name: build
+        run: python3 tools/ci_build/build.py
+
+      - name: show CPU info
+        run: |
+          lscpu
+          free
+          df -h
+
+      # Runs a set of commands using the runners shell
+      - name: Run benchmark
+        run: |
+          python3 benchmark/run_bench.py -v
+          echo "done".
+          
+      - name: upload benchmark results   
+        uses: actions/upload-artifact@v3
+        with:
+          name: benchmark_table
+          path: benchmark/benchmark_results.md
