@@ -23,8 +23,10 @@ jobs:
   mac_build:
     runs-on: macos-12
     steps:
-    - name: Setup Debug Session
-      uses: csexton/debugger-action@master
+    #- name: Setup Debug Session
+    #  uses: csexton/debugger-action@master
+    - name: SSH connection to Actions
+      uses: P3TERX/debugger-action@master
     - uses: actions/checkout@v2
     #- name: Build
     #  run: swift build
